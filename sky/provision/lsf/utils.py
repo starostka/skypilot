@@ -1,6 +1,7 @@
 """LSF utilities for SkyPilot."""
 import math
 import re
+import shlex
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
 
 from sky import sky_logging
@@ -460,6 +461,40 @@ def canonicalize_lsf_gpu_model(raw_name: str) -> str:
                 return canonical
 
     return raw_name.upper()
+
+
+def build_login_proxy_command(ssh_config_dict: Dict[str, Any]) -> str:
+    """ProxyCommand that hops through the LSF login node.
+
+    The compute-node sshd is only reachable on the login node's loopback
+    (the reverse tunnel binds 127.0.0.1), so every connection to the
+    virtual instance is proxied with `ssh -W` via the login node. Used
+    both by the provisioner's command runners and by the generated
+    `~/.sky/generated` SSH config (`ssh <cluster>`).
+    """
+    parts = [
+        'ssh',
+        '-o', 'StrictHostKeyChecking=no',
+        '-o', 'UserKnownHostsFile=/dev/null',
+        '-o', 'IdentitiesOnly=yes',
+        '-o', 'ExitOnForwardFailure=yes',
+        '-o', 'ServerAliveInterval=30',
+        '-p', str(ssh_config_dict['port']),
+    ]  # yapf: disable
+    private_key = ssh_config_dict.get('private_key')
+    if private_key is not None:
+        parts += ['-i', private_key]
+    proxy_command = ssh_config_dict.get('proxycommand')
+    if proxy_command is not None:
+        parts += ['-o', f'ProxyCommand={proxy_command}']
+    proxy_jump = ssh_config_dict.get('proxyjump')
+    if proxy_jump is not None:
+        parts += ['-J', proxy_jump]
+    parts += [
+        '-W', '%h:%p',
+        f'{ssh_config_dict["user"]}@{ssh_config_dict["hostname"]}',
+    ]  # yapf: disable
+    return shlex.join(parts)
 
 
 def get_default_walltime(cluster: str) -> str:

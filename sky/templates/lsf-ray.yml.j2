@@ -35,6 +35,9 @@ provider:
 auth:
   ssh_user: {{ssh_user}}
   ssh_private_key: {{ssh_private_key}}
+  # Every connection to the virtual instance hops through the login node
+  # to reach the reverse-tunneled in-job sshd on its loopback.
+  ssh_proxy_command: {{lsf_login_proxy_command | tojson}}
 
 available_node_types:
   ray_head_default:

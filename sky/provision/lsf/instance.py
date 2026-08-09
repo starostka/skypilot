@@ -867,38 +867,6 @@ def cleanup_ports(
     del cluster_name_on_cloud, ports, provider_config
 
 
-def _build_login_proxy_command(ssh_config_dict: Dict[str, Any]) -> str:
-    """ProxyCommand that hops through the LSF login node.
-
-    The compute-node sshd is only reachable on the login node's loopback
-    (the reverse tunnel binds 127.0.0.1), so every connection to the
-    virtual instance is proxied with `ssh -W` via the login node.
-    """
-    parts = [
-        'ssh',
-        '-o', 'StrictHostKeyChecking=no',
-        '-o', 'UserKnownHostsFile=/dev/null',
-        '-o', 'IdentitiesOnly=yes',
-        '-o', 'ExitOnForwardFailure=yes',
-        '-o', 'ServerAliveInterval=30',
-        '-p', str(ssh_config_dict['port']),
-    ]  # yapf: disable
-    private_key = ssh_config_dict.get('private_key')
-    if private_key is not None:
-        parts += ['-i', private_key]
-    proxy_command = ssh_config_dict.get('proxycommand')
-    if proxy_command is not None:
-        parts += ['-o', f'ProxyCommand={proxy_command}']
-    proxy_jump = ssh_config_dict.get('proxyjump')
-    if proxy_jump is not None:
-        parts += ['-J', proxy_jump]
-    parts += [
-        '-W', '%h:%p',
-        f'{ssh_config_dict["user"]}@{ssh_config_dict["hostname"]}',
-    ]  # yapf: disable
-    return shlex.join(parts)
-
-
 def get_command_runners(
     cluster_info: common.ClusterInfo,
     **credentials: Dict[str, Any],
@@ -917,7 +885,7 @@ def get_command_runners(
 
     provider_config = cluster_info.provider_config
     ssh_config_dict = provider_config['ssh']
-    proxy_command = _build_login_proxy_command(ssh_config_dict)
+    proxy_command = lsf_utils.build_login_proxy_command(ssh_config_dict)
 
     # The SkyPilot key: enrolled in the user's authorized_keys at provision
     # time, accepted by the in-job sshd (and by the login node, though the

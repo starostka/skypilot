@@ -402,6 +402,18 @@ class Lsf(clouds.Cloud):
 
         walltime = lsf_utils.get_default_walltime(cluster)
 
+        # ProxyCommand through the login node, used in the generated
+        # cluster config's auth section so `ssh <cluster>` (and any
+        # credential-based SSH) can reach the reverse-tunneled sshd.
+        login_proxy_command = lsf_utils.build_login_proxy_command({
+            'hostname': credentials.host,
+            'port': credentials.port,
+            'user': credentials.user,
+            'private_key': credentials.identity_file,
+            'proxycommand': credentials.proxy_command,
+            'proxyjump': credentials.proxy_jump,
+        })
+
         deploy_vars = {
             'instance_type': resources.instance_type,
             'custom_resources': custom_resources,
@@ -423,6 +435,7 @@ class Lsf(clouds.Cloud):
             # SkyPilot key ('ssh_private_key' in the auth section); see the
             # 'ssh' and 'auth' sections of lsf-ray.yml.j2.
             'lsf_private_key': credentials.identity_file,
+            'lsf_login_proxy_command': login_proxy_command,
             'bsub_options': bsub_options,
         }
 
