@@ -507,7 +507,11 @@ def _post_provision_setup(
         is_k8s_cloud = cloud_name.lower(
         ) in provision_constants.K8S_BASED_CLOUDS
         is_slurm_cloud = cloud_name.lower() == 'slurm'
-        if not is_k8s_cloud and not is_slurm_cloud:
+        # LSF: run_instances already waits for the in-job sshd + reverse
+        # tunnel to come up (ready signal), so skip the raw SSH wait here
+        # like Slurm does.
+        is_lsf_cloud = cloud_name.lower() == 'lsf'
+        if not is_k8s_cloud and not is_slurm_cloud and not is_lsf_cloud:
             logger.debug(
                 f'\nWaiting for SSH to be available for {cluster_name!r} ...')
             wait_for_ssh(cluster_info, ssh_credentials)

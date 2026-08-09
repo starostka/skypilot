@@ -1490,6 +1490,11 @@ _SBATCH_OPTIONS_SCHEMA = {
     },
 }
 
+# bsub options carry the same value constraints as sbatch options
+# (single-line strings/numbers/booleans; newlines are rejected to prevent
+# #BSUB directive injection).
+_BSUB_OPTIONS_SCHEMA = _SBATCH_OPTIONS_SCHEMA
+
 _GPU_PARTITION_MAP_SCHEMA = {
     'type': 'object',
     'required': [],
@@ -2120,6 +2125,105 @@ def get_config_schema():
                                     'properties': {
                                         'pricing': _PRICING_SCHEMA,
                                         'sbatch_options': _SBATCH_OPTIONS_SCHEMA,  # pylint: disable=line-too-long
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            }
+        },
+        'lsf': {
+            'type': 'object',
+            'required': [],
+            'additionalProperties': False,
+            'properties': {
+                'allowed_clusters': {
+                    'oneOf': [{
+                        'type': 'array',
+                        'items': {
+                            'type': 'string',
+                        },
+                    }, {
+                        'type': 'string',
+                        'pattern': '^all$'
+                    }]
+                },
+                'provision_timeout': {
+                    'type': 'integer',
+                },
+                'default_walltime': {
+                    'type': 'string',
+                },
+                'pricing': _PRICING_SCHEMA,
+                'bsub_options': _BSUB_OPTIONS_SCHEMA,
+                'cluster_configs': {
+                    'type': 'object',
+                    'required': [],
+                    'properties': {},
+                    # Properties are LSF cluster aliases (~/.lsf/config).
+                    'additionalProperties': {
+                        'type': 'object',
+                        'required': [],
+                        'additionalProperties': False,
+                        'properties': {
+                            'workdir': {
+                                'type': 'string',
+                            },
+                            'tmpdir': {
+                                'type': 'string',
+                            },
+                            'default_walltime': {
+                                'type': 'string',
+                            },
+                            # Login-node hostname as resolvable from the
+                            # compute nodes (for the in-job reverse
+                            # tunnel); defaults to the SSH hostname.
+                            'internal_login_host': {
+                                'type': 'string',
+                            },
+                            'pricing': _PRICING_SCHEMA,
+                            'bsub_options': _BSUB_OPTIONS_SCHEMA,
+                            # Queue -> GPU map: LSF selects the GPU model
+                            # by queue name.
+                            'queues': {
+                                'type': 'object',
+                                'required': [],
+                                'properties': {},
+                                'additionalProperties': {
+                                    'anyOf': [{
+                                        'type': 'null',
+                                    }, {
+                                        'type': 'object',
+                                        'required': [],
+                                        'additionalProperties': False,
+                                        'properties': {
+                                            'gpus': {
+                                                'anyOf': [{
+                                                    'type': 'string',
+                                                }, {
+                                                    'type': 'null',
+                                                }],
+                                            },
+                                            'gpu_count': {
+                                                'type': 'integer',
+                                                'minimum': 1,
+                                            },
+                                        },
+                                    }],
+                                },
+                            },
+                            'queue_configs': {
+                                'type': 'object',
+                                'required': [],
+                                'properties': {},
+                                'additionalProperties': {
+                                    'type': 'object',
+                                    'required': [],
+                                    'additionalProperties': False,
+                                    'properties': {
+                                        'pricing': _PRICING_SCHEMA,
+                                        'bsub_options': _BSUB_OPTIONS_SCHEMA,
                                     },
                                 },
                             },

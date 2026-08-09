@@ -1375,6 +1375,10 @@ def _add_auth_to_cluster_config(cloud: clouds.Cloud, tmp_yaml_path: str):
             clouds.SCP,
             # TODO(jwj): Handle Slurm-specific auth logic
             clouds.Slurm,
+            # LSF: substitutes the public key into the provider config
+            # (provider.public_key), enrolled into the shared
+            # authorized_keys at provision time.
+            clouds.Lsf,
             clouds.Vsphere,
             clouds.Cudo,
             clouds.Paperspace,

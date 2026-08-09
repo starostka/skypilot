@@ -639,7 +639,8 @@ def _print_checked_cloud(
         if not isinstance(reason, str):
             if not ok and isinstance(
                     cloud_tuple[1],
-                (sky_clouds.SSH, sky_clouds.Kubernetes, sky_clouds.Slurm)):
+                (sky_clouds.SSH, sky_clouds.Kubernetes, sky_clouds.Slurm,
+                 sky_clouds.Lsf)):
                 if reason is not None:
                     reason_str = _format_context_details(cloud_tuple[1],
                                                          show_details=True,
@@ -667,7 +668,8 @@ def _print_checked_cloud(
             activated_account = cloud.get_active_user_identity_str()
         if isinstance(
                 cloud_tuple[1],
-            (sky_clouds.SSH, sky_clouds.Kubernetes, sky_clouds.Slurm)):
+            (sky_clouds.SSH, sky_clouds.Kubernetes, sky_clouds.Slurm,
+             sky_clouds.Lsf)):
             detail_string = _format_context_details(cloud_tuple[1],
                                                     show_details=True,
                                                     ctx2text=ctx2text)
@@ -701,6 +703,9 @@ def _format_context_details(cloud: Union[str, sky_clouds.Cloud],
     elif isinstance(cloud_type, sky_clouds.Slurm):
         # Get the cluster names from SLURM config
         contexts = sky_clouds.Slurm.existing_allowed_clusters()
+    elif isinstance(cloud_type, sky_clouds.Lsf):
+        # Get the cluster names from the LSF config
+        contexts = sky_clouds.Lsf.existing_allowed_clusters()
     else:
         assert isinstance(cloud_type, sky_clouds.Kubernetes)
         contexts = sky_clouds.Kubernetes.existing_allowed_contexts()
@@ -774,7 +779,7 @@ def _format_context_details(cloud: Union[str, sky_clouds.Cloud],
             f'\n    {symbol}{cleaned_context}{text_suffix}')
     if isinstance(cloud_type, sky_clouds.SSH):
         identity_str = 'SSH Node Pools'
-    elif isinstance(cloud_type, sky_clouds.Slurm):
+    elif isinstance(cloud_type, (sky_clouds.Slurm, sky_clouds.Lsf)):
         identity_str = 'Allowed clusters'
     else:
         identity_str = 'Allowed contexts'
@@ -799,7 +804,8 @@ def _format_enabled_cloud(cloud_name: str,
     if cloud_name in [
             repr(sky_clouds.Kubernetes()),
             repr(sky_clouds.SSH()),
-            repr(sky_clouds.Slurm())
+            repr(sky_clouds.Slurm()),
+            repr(sky_clouds.Lsf())
     ]:
         return (f'{title}' + _format_context_details(
             cloud_name, show_details=False, ctx2text=ctx2text))

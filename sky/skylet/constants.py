@@ -617,6 +617,7 @@ OVERRIDEABLE_CONFIG_KEYS_IN_TASK: List[Tuple[str, ...]] = [
     ('vast', 'datacenter_only'),
     ('vast', 'create_instance_kwargs'),
     ('slurm', 'sbatch_options'),
+    ('lsf', 'bsub_options'),
     ('slurm', 'cpu_partition'),
     ('active_workspace',),
 ]
@@ -742,6 +743,7 @@ CATALOG_DIR = '~/.sky/catalogs'
 ALL_CLOUDS = ('aws', 'azure', 'gcp', 'ibm', 'lambda', 'scp', 'oci',
               'kubernetes', 'runpod', 'vast', 'vsphere', 'cudo', 'fluidstack',
               'paperspace', 'primeintellect', 'do', 'nebius', 'ssh', 'slurm',
+              'lsf',
               'hyperbolic', 'seeweb', 'shadeform', 'yotta', 'mithril', 'verda')
 # END constants used for service catalog.
 

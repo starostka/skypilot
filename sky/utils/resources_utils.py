@@ -397,7 +397,8 @@ def format_resource(
             elements_full.append(mem_element[1])
 
     is_slurm = resource.cloud.canonical_name() == 'slurm'
-    if not is_k8s and not is_slurm:
+    is_lsf = resource.cloud.canonical_name() == 'lsf'
+    if not is_k8s and not is_slurm and not is_lsf:
         instance_type_full = resource.instance_type
         instance_type_simple = common_utils.truncate_long_string(
             instance_type_full, 15)
