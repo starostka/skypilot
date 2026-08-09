@@ -263,6 +263,7 @@ def _build_bsub_script(
     base_dir: str,
     tmpdir: Optional[str],
     bsub_options: Dict[str, Any],
+    remote_ssh_server: Optional[str] = None,
 ) -> str:
     """Build the bsub job script for an LSF virtual instance."""
     sky_cluster_home_dir = _sky_cluster_home_dir(base_dir,
@@ -294,6 +295,11 @@ def _build_bsub_script(
 
     runtime_dir_env_var = skylet_constants.SKY_RUNTIME_DIR_ENV_VAR_KEY
 
+    # Optional dropbear fallback for sites whose OpenSSH build cannot run
+    # as an unprivileged user (see the auth self-test in the script).
+    remote_ssh_server_sh = (shlex.quote(remote_ssh_server)
+                            if remote_ssh_server else "''")
+
     # pylint: disable=line-too-long
     # fmt: off
     script = f"""\
@@ -324,6 +330,7 @@ cleanup() {{
     [ -n "${{SSHD_PID:-}}" ] && kill $SSHD_PID 2>/dev/null || true
     [ -n "${{TUNNEL_PID:-}}" ] && kill $TUNNEL_PID 2>/dev/null || true
     echo "Cleaning up sky directories..."
+    [ -n "${{PORT:-}}" ] && rm -f ~/.sky/lsf_ports/$PORT || true
     rm -rf "$RUNTIME_DIR"
     rm -rf "$SKY_CLUSTER_DIR"
     exit $saved_exit
@@ -354,28 +361,85 @@ touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys
 grep -qF "$(cat $LSF_STATE_DIR/tunnel_key.pub)" ~/.ssh/authorized_keys || cat $LSF_STATE_DIR/tunnel_key.pub >> ~/.ssh/authorized_keys
 
 SSHD_BIN=$(command -v sshd || echo /usr/sbin/sshd)
-if [ ! -x "$SSHD_BIN" ]; then
-    echo "sshd binary not found on the compute node." >&2
-    exit 1
-fi
+# Optional dropbear fallback for sites whose OpenSSH build cannot serve
+# as an unprivileged user. Either a dropbearmulti multi-call binary
+# (file) or a directory containing separate dropbear + dropbearkey
+# binaries.
+REMOTE_SSH_SERVER={remote_ssh_server_sh}
+SERVER_KIND="sshd"
+DROPBEAR_CMD=""
+DROPBEARKEY_CMD=""
 
-start_sshd() {{
-    # sshd runs fine as an unprivileged user on a loopback high port with
-    # a user-owned host key; UsePAM must be off for non-root operation.
-    "$SSHD_BIN" -D -e -f /dev/null \\
-        -p "$1" -o ListenAddress=127.0.0.1 \\
-        -h "$LSF_STATE_DIR/host_key" \\
-        -o "AuthorizedKeysFile=$HOME/.ssh/authorized_keys" \\
-        -o PasswordAuthentication=no -o PubkeyAuthentication=yes \\
-        -o UsePAM=no -o PidFile=none \\
-        -o "SetEnv={runtime_dir_env_var}=$RUNTIME_DIR" \\
-        >> $LSF_STATE_DIR/sshd.log 2>&1 &
+resolve_dropbear() {{
+    if [ -z "$REMOTE_SSH_SERVER" ]; then
+        return 1
+    fi
+    if [ -d "$REMOTE_SSH_SERVER" ]; then
+        # Directory shape: separate static binaries.
+        DROPBEAR_CMD="$REMOTE_SSH_SERVER/dropbear"
+        DROPBEARKEY_CMD="$REMOTE_SSH_SERVER/dropbearkey"
+        [ -x "$REMOTE_SSH_SERVER/dropbear" ] && [ -x "$REMOTE_SSH_SERVER/dropbearkey" ] || return 1
+    elif [ -x "$REMOTE_SSH_SERVER" ]; then
+        # File shape: busybox-style dropbearmulti multi-call binary.
+        # NOTE: invoked unquoted so the applet name word-splits; the
+        # configured path must not contain spaces.
+        DROPBEAR_CMD="$REMOTE_SSH_SERVER dropbear"
+        DROPBEARKEY_CMD="$REMOTE_SSH_SERVER dropbearkey"
+    else
+        return 1
+    fi
+}}
+
+use_dropbear() {{
+    resolve_dropbear || return 1
+    # Dropbear uses its own host key format, separate from the OpenSSH
+    # host_key.
+    [ -f $LSF_STATE_DIR/dropbear_host_key ] || $DROPBEARKEY_CMD -t ed25519 -f $LSF_STATE_DIR/dropbear_host_key >> $LSF_STATE_DIR/sshd.log 2>&1 || return 1
+    SERVER_KIND="dropbear"
+}}
+
+start_server() {{
+    if [ "$SERVER_KIND" = "dropbear" ]; then
+        # Dropbear involves no PAM and auths against
+        # ~/.ssh/authorized_keys natively. -F foreground, -E log to
+        # stderr, -s disable password auth.
+        $DROPBEAR_CMD -F -E -s -p "127.0.0.1:$1" \\
+            -r "$LSF_STATE_DIR/dropbear_host_key" \\
+            -P "$LSF_STATE_DIR/dropbear.pid" \\
+            >> $LSF_STATE_DIR/sshd.log 2>&1 &
+    else
+        # sshd runs as an unprivileged user on a loopback high port with a
+        # user-owned host key. UsePAM=no is required for non-root
+        # operation; some builds (RHEL) refuse it and force PAM, which the
+        # auth self-test below detects.
+        "$SSHD_BIN" -D -e -f /dev/null \\
+            -p "$1" -o ListenAddress=127.0.0.1 \\
+            -h "$LSF_STATE_DIR/host_key" \\
+            -o "AuthorizedKeysFile=$HOME/.ssh/authorized_keys" \\
+            -o PasswordAuthentication=no -o PubkeyAuthentication=yes \\
+            -o UsePAM=no -o PidFile=none \\
+            >> $LSF_STATE_DIR/sshd.log 2>&1 &
+    fi
     SSHD_PID=$!
 }}
 
+auth_self_test() {{
+    # End-to-end auth probe: tunnel_key.pub is already enrolled in
+    # ~/.ssh/authorized_keys, which the in-job server reads, so a login
+    # must succeed. A server can listen and still reject every login
+    # (observed on DTU EL9: the RHEL OpenSSH build forces PAM --
+    # "'UsePAM no' is not supported in this build" -- publickey is
+    # accepted, then the PAM account stage, which cannot run as
+    # non-root, rejects the session).
+    ssh -i "$LSF_STATE_DIR/tunnel_key" -p "$1" \\
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \\
+        -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=5 \\
+        127.0.0.1 true >> $LSF_STATE_DIR/sshd.log 2>&1
+}}
+
 start_tunnel() {{
-    # Reverse-forward the sshd port to the login node's loopback. The
-    # API server reaches it by proxying through the login node.
+    # Reverse-forward the SSH server port to the login node's loopback.
+    # The API server reaches it by proxying through the login node.
     ssh -i "$LSF_STATE_DIR/tunnel_key" \\
         -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \\
         -o IdentitiesOnly=yes \\
@@ -386,16 +450,46 @@ start_tunnel() {{
     TUNNEL_PID=$!
 }}
 
+if [ ! -x "$SSHD_BIN" ]; then
+    if ! use_dropbear; then
+        echo "No usable SSH server: sshd not found and no dropbear fallback configured (lsf.cluster_configs.<cluster>.remote_ssh_server)." >&2
+        exit 1
+    fi
+fi
+
 # Deterministic port derived from the LSF job id, with collision retry
 # (the port must be free on this node AND on the login node; the latter is
 # detected via ExitOnForwardFailure).
+AUTH_VERIFIED=""
 PORT=""
 for i in $(seq 0 {lsf_utils.TUNNEL_PORT_MAX_ATTEMPTS - 1}); do
     CANDIDATE=$(({lsf_utils.TUNNEL_PORT_BASE} + (LSB_JOBID + i) % {lsf_utils.TUNNEL_PORT_RANGE}))
-    start_sshd $CANDIDATE
+    start_server $CANDIDATE
     sleep 1
     if ! kill -0 $SSHD_PID 2>/dev/null; then
+        # Bind failure: port taken on this node; try the next port.
         continue
+    fi
+    if [ -z "$AUTH_VERIFIED" ]; then
+        if auth_self_test $CANDIDATE; then
+            AUTH_VERIFIED=1
+        else
+            # Auth failure is binary-level, not port-level: do NOT scan
+            # further ports; fall back to dropbear on the SAME port.
+            kill $SSHD_PID 2>/dev/null || true
+            if [ "$SERVER_KIND" = "dropbear" ] || ! use_dropbear; then
+                echo "In-job SSH server failed the auth self-test and no usable dropbear fallback is configured (lsf.cluster_configs.<cluster>.remote_ssh_server)." >&2
+                exit 1
+            fi
+            echo "System sshd failed the auth self-test (PAM-forced build?); falling back to dropbear."
+            start_server $CANDIDATE
+            sleep 1
+            if ! kill -0 $SSHD_PID 2>/dev/null || ! auth_self_test $CANDIDATE; then
+                echo "Dropbear fallback failed the auth self-test." >&2
+                exit 1
+            fi
+            AUTH_VERIFIED=1
+        fi
     fi
     start_tunnel $CANDIDATE
     sleep 3
@@ -403,6 +497,7 @@ for i in $(seq 0 {lsf_utils.TUNNEL_PORT_MAX_ATTEMPTS - 1}); do
         PORT=$CANDIDATE
         break
     fi
+    # Port taken on the login node; try the next one.
     kill $SSHD_PID 2>/dev/null || true
 done
 if [ -z "$PORT" ]; then
@@ -410,16 +505,43 @@ if [ -z "$PORT" ]; then
     exit 1
 fi
 
+# Publish the runtime dir for incoming SSH sessions. Neither server can
+# inject env vars for us (RHEL sshd forces PAM and rejects UsePAM=no;
+# dropbear has no SetEnv), so sessions resolve it from the server port
+# they came in through: bash sources ~/.bashrc for non-interactive
+# SSH-spawned shells (SSH_SOURCE_BASHRC, enabled on Debian- and
+# RHEL-family builds), and the block below maps $SSH_CONNECTION's server
+# port to the per-cluster runtime dir.
+mkdir -p ~/.sky/lsf_ports
+echo "$RUNTIME_DIR" > ~/.sky/lsf_ports/$PORT
+touch ~/.bashrc
+if ! grep -qF "# >>> skypilot-lsf-runtime >>>" ~/.bashrc; then
+cat >> ~/.bashrc <<'SKY_LSF_BASHRC'
+# >>> skypilot-lsf-runtime >>>
+# Added by SkyPilot (LSF backend): resolve the per-cluster runtime dir
+# from the SSH server port this session came in through.
+if [ -n "${{SSH_CONNECTION:-}}" ]; then
+    _sky_lsf_port=${{SSH_CONNECTION##* }}
+    if [ -f "$HOME/.sky/lsf_ports/$_sky_lsf_port" ]; then
+        export {runtime_dir_env_var}="$(cat "$HOME/.sky/lsf_ports/$_sky_lsf_port")"
+    fi
+    unset _sky_lsf_port
+fi
+# <<< skypilot-lsf-runtime <<<
+SKY_LSF_BASHRC
+fi
+
 # Record the endpoint on the shared filesystem for the provisioner.
 cat > $LSF_STATE_DIR/endpoint.json <<EOF
 {{"host": "$(hostname)", "port": $PORT, "job_id": "$LSB_JOBID"}}
 EOF
 touch {ready_signal}
-echo "SkyPilot LSF bootstrap ready: $(hostname) port $PORT (job $LSB_JOBID)"
+echo "SkyPilot LSF bootstrap ready: $(hostname) port $PORT (job $LSB_JOBID, server $SERVER_KIND)"
 
-# Keep sshd and the reverse tunnel alive for the lifetime of the job.
+# Keep the SSH server and the reverse tunnel alive for the lifetime of
+# the job.
 while true; do
-    kill -0 $SSHD_PID 2>/dev/null || start_sshd $PORT
+    kill -0 $SSHD_PID 2>/dev/null || start_server $PORT
     kill -0 $TUNNEL_PID 2>/dev/null || start_tunnel $PORT
     sleep 15
 done
@@ -447,6 +569,78 @@ def _enroll_public_key(client: 'lsf.LsfClient', public_key: str) -> None:
         cmd,
         'Failed to enroll the SkyPilot public key on the LSF cluster.',
         stderr=f'{stdout}\n{stderr}')
+
+
+def _remote_file_size(client: 'lsf.LsfClient', path: str) -> Optional[int]:
+    """Size of a file on the login node, or None if it does not exist."""
+    rc, stdout, _ = client.run_raw(f'stat -c %s {shlex.quote(path)}')
+    if rc != 0:
+        return None
+    try:
+        return int(stdout.strip())
+    except ValueError:
+        return None
+
+
+def _stage_remote_ssh_server(client: 'lsf.LsfClient', local_path: str,
+                             remote_path: str) -> None:
+    """Stage the dropbear fallback binaries onto the cluster.
+
+    ``local_path`` is a path on the API server; ``remote_path`` the
+    configured ``lsf.remote_ssh_server`` path on the cluster (shared
+    filesystem). Both sides use the same shape: a single dropbearmulti
+    multi-call binary (file), or a directory -- in which case only the
+    ``dropbear`` and ``dropbearkey`` binaries are staged. Idempotent:
+    files whose remote size already matches are skipped.
+    """
+    local_path = os.path.expanduser(local_path)
+    if os.path.isdir(local_path):
+        names = ('dropbear', 'dropbearkey')
+        missing = [
+            n for n in names if not os.path.isfile(os.path.join(local_path, n))
+        ]
+        if missing:
+            raise ValueError(
+                f'lsf.remote_ssh_server_local directory {local_path!r} is '
+                f'missing required binaries: {missing}.')
+        pairs = [
+            (os.path.join(local_path, n), f'{remote_path}/{n}') for n in names
+        ]
+        remote_dir = remote_path
+    elif os.path.isfile(local_path):
+        pairs = [(local_path, remote_path)]
+        remote_dir = os.path.dirname(remote_path)
+    else:
+        raise ValueError(
+            f'lsf.remote_ssh_server_local path {local_path!r} does not '
+            'exist.')
+
+    staged = []
+    for local_file, remote_file in pairs:
+        local_size = os.path.getsize(local_file)
+        if _remote_file_size(client, remote_file) == local_size:
+            logger.debug(f'{remote_file} already staged '
+                         f'({local_size} bytes); skipping.')
+            continue
+        if remote_dir:
+            cmd = f'mkdir -p {shlex.quote(remote_dir)}'
+            rc, stdout, stderr = client.run_raw(cmd)
+            subprocess_utils.handle_returncode(
+                rc,
+                cmd,
+                'Failed to create the remote_ssh_server directory.',
+                stderr=f'{stdout}\n{stderr}')
+        client.runner.rsync(local_file, remote_file, up=True, stream_logs=False)
+        cmd = f'chmod +x {shlex.quote(remote_file)}'
+        rc, stdout, stderr = client.run_raw(cmd)
+        subprocess_utils.handle_returncode(
+            rc,
+            cmd,
+            f'Failed to mark {remote_file} executable.',
+            stderr=f'{stdout}\n{stderr}')
+        staged.append(remote_file)
+    if staged:
+        logger.debug(f'Staged dropbear fallback binaries: {staged}')
 
 
 def _resolve_base_dirs(client: 'lsf.LsfClient',
@@ -576,6 +770,31 @@ def _create_virtual_instance(
     if internal_login_host is None:
         internal_login_host = provider_config['ssh']['hostname']
 
+    # Optional dropbear fallback: a path ON THE CLUSTER to either a
+    # dropbearmulti multi-call binary (file) or a directory with separate
+    # dropbear + dropbearkey binaries. Used when the system sshd cannot
+    # serve as an unprivileged user (e.g. PAM-forced RHEL builds).
+    remote_ssh_server = skypilot_config.get_effective_region_config(
+        cloud='lsf',
+        region=region,
+        keys=('remote_ssh_server',),
+        default_value=None)
+    remote_ssh_server_local = skypilot_config.get_effective_region_config(
+        cloud='lsf',
+        region=region,
+        keys=('remote_ssh_server_local',),
+        default_value=None)
+    if remote_ssh_server is not None:
+        remote_ssh_server = lsf_utils.expand_path_vars(remote_ssh_server,
+                                                       client.get_env())
+        if remote_ssh_server_local is not None:
+            _stage_remote_ssh_server(client, remote_ssh_server_local,
+                                     remote_ssh_server)
+    elif remote_ssh_server_local is not None:
+        logger.warning('lsf.remote_ssh_server_local is set but '
+                       'lsf.remote_ssh_server is not; nothing to stage. '
+                       'Set both to enable the dropbear fallback.')
+
     bsub_options = resources.get('bsub_options', {}) or {}
     walltime = resources.get('walltime')
     if walltime is None:
@@ -597,6 +816,7 @@ def _create_virtual_instance(
         base_dir=base_dir,
         tmpdir=tmpdir,
         bsub_options=bsub_options,
+        remote_ssh_server=remote_ssh_server,
     )
 
     provision_script_path = _bsub_provision_script_path(base_dir,

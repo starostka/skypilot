@@ -272,3 +272,175 @@ class TestQueryInstances:
                 non_terminated_only=True,
             )
         assert statuses == {}
+
+
+def _build_script(**kwargs):
+    defaults = dict(
+        cluster_name_on_cloud='sky-abcd-user',
+        queue='gpuv100',
+        cpus=4,
+        memory_gb=16.0,
+        accelerator_count=2,
+        walltime='24:00',
+        login_host='hpclogin1',
+        base_dir='/zhome/ab/c/12345',
+        tmpdir=None,
+        bsub_options={},
+    )
+    defaults.update(kwargs)
+    # pylint: disable=protected-access
+    return lsf_instance._build_bsub_script(**defaults)
+
+
+class TestBsubScriptSshServerSelection:
+    """The in-job SSH server must prove auth end-to-end, not just run.
+
+    Live-verified on a DTU EL9 node: the RHEL OpenSSH build forces PAM
+    ('UsePAM no' is not supported in this build), accepts the publickey
+    and then rejects the session in the PAM account stage, so a
+    process-liveness check would accept a server that rejects every
+    login.
+    """
+
+    def test_auth_self_test_before_tunnel(self):
+        script = _build_script()
+        assert 'auth_self_test() {' in script
+        # End-to-end probe using the already-enrolled tunnel key.
+        assert ('-o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=5'
+                in script)
+        assert '127.0.0.1 true' in script
+        # The self-test gates the tunnel: it must appear before
+        # start_tunnel in the port loop.
+        loop = script.split('for i in $(seq', 1)[1]
+        assert loop.index('auth_self_test $CANDIDATE') < loop.index(
+            'start_tunnel $CANDIDATE')
+
+    def test_auth_failure_is_binary_level_not_port_level(self):
+        script = _build_script()
+        # On auth failure the script falls back to dropbear on the SAME
+        # port; only bind/forward failures advance the port scan.
+        assert 'fall back to dropbear on the SAME port' in script
+        assert 'Bind failure: port taken on this node' in script
+        assert 'Port taken on the login node' in script
+
+    def test_no_fallback_configured(self):
+        script = _build_script(remote_ssh_server=None)
+        assert "REMOTE_SSH_SERVER=''" in script
+
+    def test_fallback_path_embedded(self):
+        script = _build_script(
+            remote_ssh_server='/zhome/ab/c/12345/bin/dropbearmulti')
+        assert ('REMOTE_SSH_SERVER=/zhome/ab/c/12345/bin/dropbearmulti'
+                in script)
+
+    def test_fallback_supports_file_and_directory_shapes(self):
+        script = _build_script(remote_ssh_server='/some/path')
+        # Directory shape: separate dropbear + dropbearkey binaries.
+        assert 'if [ -d "$REMOTE_SSH_SERVER" ]; then' in script
+        assert 'DROPBEAR_CMD="$REMOTE_SSH_SERVER/dropbear"' in script
+        assert 'DROPBEARKEY_CMD="$REMOTE_SSH_SERVER/dropbearkey"' in script
+        # File shape: dropbearmulti multi-call binary.
+        assert 'DROPBEAR_CMD="$REMOTE_SSH_SERVER dropbear"' in script
+        assert 'DROPBEARKEY_CMD="$REMOTE_SSH_SERVER dropbearkey"' in script
+
+    def test_dropbear_invocation(self):
+        script = _build_script(remote_ssh_server='/some/path')
+        # -F foreground, -E stderr, -s no password auth, loopback bind,
+        # dropbear-format host key (separate from the OpenSSH host_key).
+        assert '$DROPBEAR_CMD -F -E -s -p "127.0.0.1:$1"' in script
+        assert '-r "$LSF_STATE_DIR/dropbear_host_key"' in script
+        assert '$DROPBEARKEY_CMD -t ed25519' in script
+
+    def test_runtime_dir_published_via_port_map(self):
+        """Neither server can inject env vars (PAM-forced sshd rejects
+        UsePAM=no; dropbear has no SetEnv), so sessions resolve the
+        runtime dir from the server port via a ~/.bashrc block."""
+        script = _build_script()
+        assert '-o SetEnv' not in script
+        assert 'echo "$RUNTIME_DIR" > ~/.sky/lsf_ports/$PORT' in script
+        assert '# >>> skypilot-lsf-runtime >>>' in script
+        assert '_sky_lsf_port=${SSH_CONNECTION##* }' in script
+        assert ('export SKY_RUNTIME_DIR='
+                '"$(cat "$HOME/.sky/lsf_ports/$_sky_lsf_port")"') in script
+        # Cleanup removes the port map entry.
+        assert 'rm -f ~/.sky/lsf_ports/$PORT' in script
+
+
+class TestStageRemoteSshServer:
+
+    def _client(self, remote_sizes):
+        """Mocked LsfClient whose run_raw answers stat/mkdir/chmod.
+
+        remote_sizes maps remote path -> size (or None for missing).
+        """
+        import shlex as _shlex
+
+        client = mock.MagicMock()
+
+        def _run_raw(cmd):
+            if cmd.startswith('stat -c %s '):
+                path = _shlex.split(cmd)[-1]
+                size = remote_sizes.get(path)
+                if size is None:
+                    return (1, '', 'No such file or directory')
+                return (0, f'{size}\n', '')
+            return (0, '', '')
+
+        client.run_raw.side_effect = _run_raw
+        return client
+
+    def test_file_shape_skips_when_size_matches(self, tmp_path):
+        local = tmp_path / 'dropbearmulti'
+        local.write_bytes(b'x' * 100)
+        client = self._client({'/remote/bin/dropbearmulti': 100})
+        # pylint: disable=protected-access
+        lsf_instance._stage_remote_ssh_server(client, str(local),
+                                              '/remote/bin/dropbearmulti')
+        client.runner.rsync.assert_not_called()
+
+    def test_file_shape_stages_and_marks_executable(self, tmp_path):
+        local = tmp_path / 'dropbearmulti'
+        local.write_bytes(b'x' * 100)
+        client = self._client({'/remote/bin/dropbearmulti': None})
+        # pylint: disable=protected-access
+        lsf_instance._stage_remote_ssh_server(client, str(local),
+                                              '/remote/bin/dropbearmulti')
+        client.runner.rsync.assert_called_once_with(str(local),
+                                                    '/remote/bin/dropbearmulti',
+                                                    up=True,
+                                                    stream_logs=False)
+        run_raw_cmds = [c.args[0] for c in client.run_raw.call_args_list]
+        assert 'mkdir -p /remote/bin' in run_raw_cmds
+        assert 'chmod +x /remote/bin/dropbearmulti' in run_raw_cmds
+
+    def test_directory_shape_stages_only_missing_binaries(self, tmp_path):
+        (tmp_path / 'dropbear').write_bytes(b'x' * 100)
+        (tmp_path / 'dropbearkey').write_bytes(b'y' * 50)
+        client = self._client({
+            '/remote/dropbear-bin/dropbear': 100,  # already staged
+            '/remote/dropbear-bin/dropbearkey': None,
+        })
+        # pylint: disable=protected-access
+        lsf_instance._stage_remote_ssh_server(client, str(tmp_path),
+                                              '/remote/dropbear-bin')
+        client.runner.rsync.assert_called_once_with(
+            str(tmp_path / 'dropbearkey'),
+            '/remote/dropbear-bin/dropbearkey',
+            up=True,
+            stream_logs=False)
+
+    def test_directory_shape_missing_binary_raises(self, tmp_path):
+        (tmp_path / 'dropbear').write_bytes(b'x')
+        client = self._client({})
+        with pytest.raises(ValueError, match='dropbearkey'):
+            # pylint: disable=protected-access
+            lsf_instance._stage_remote_ssh_server(client, str(tmp_path),
+                                                  '/remote/dropbear-bin')
+
+    def test_missing_local_path_raises(self, tmp_path):
+        client = self._client({})
+        with pytest.raises(ValueError, match='does not exist'):
+            # pylint: disable=protected-access
+            lsf_instance._stage_remote_ssh_server(client,
+                                                  str(tmp_path / 'nope'),
+                                                  '/remote/x')

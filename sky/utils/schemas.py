@@ -2182,6 +2182,22 @@ def get_config_schema():
                             'internal_login_host': {
                                 'type': 'string',
                             },
+                            # Dropbear fallback for sites whose OpenSSH
+                            # build cannot serve as an unprivileged user
+                            # (PAM-forced builds): path ON THE CLUSTER to
+                            # a dropbearmulti multi-call binary (file) or
+                            # a directory with separate dropbear +
+                            # dropbearkey binaries.
+                            'remote_ssh_server': {
+                                'type': 'string',
+                            },
+                            # Optional path on the API server to stage
+                            # the fallback binaries from (same shape as
+                            # remote_ssh_server); staged idempotently via
+                            # the login node before first submit.
+                            'remote_ssh_server_local': {
+                                'type': 'string',
+                            },
                             'pricing': _PRICING_SCHEMA,
                             'bsub_options': _BSUB_OPTIONS_SCHEMA,
                             # Queue -> GPU map: LSF selects the GPU model
