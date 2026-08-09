@@ -72,8 +72,8 @@ class SSHConfigCredentialProvider(CredentialProvider):
     def _load(self) -> 'SSHConfig':
         # Import lazily so that merely importing the LSF backend does not
         # require paramiko.
-        from paramiko.config import (
-            SSHConfig)  # pylint: disable=import-outside-toplevel
+        # pylint: disable-next=import-outside-toplevel
+        from paramiko.config import SSHConfig
         path = os.path.expanduser(self._path)
         return SSHConfig.from_path(path)
 

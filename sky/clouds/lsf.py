@@ -30,16 +30,28 @@ class Lsf(clouds.Cloud):
 
     _REPR = 'LSF'
     _CLOUD_UNSUPPORTED_FEATURES = {
-        clouds.CloudImplementationFeatures.AUTOSTOP: 'LSF does not support autostop.',
-        clouds.CloudImplementationFeatures.AUTODOWN: 'LSF does not support autodown.',
-        clouds.CloudImplementationFeatures.AUTO_TERMINATE: 'LSF does not support auto-termination.',
-        clouds.CloudImplementationFeatures.STOP: 'LSF does not support stopping instances.',
-        clouds.CloudImplementationFeatures.SPOT_INSTANCE: 'Spot instances are not supported in LSF.',
+        clouds.CloudImplementationFeatures.AUTOSTOP: 'LSF does not '
+                                                     'support autostop.',
+        clouds.CloudImplementationFeatures.AUTODOWN: 'LSF does not '
+                                                     'support autodown.',
+        clouds.CloudImplementationFeatures.AUTO_TERMINATE: 'LSF does not '
+                                                           'support auto-'
+                                                           'termination.',
+        clouds.CloudImplementationFeatures.STOP: 'LSF does not support '
+                                                 'stopping instances.',
+        clouds.CloudImplementationFeatures.SPOT_INSTANCE: 'Spot instances are '
+                                                          'not supported in '
+                                                          'LSF.',
         clouds.CloudImplementationFeatures.CUSTOM_MULTI_NETWORK:
             'Customized multiple network interfaces are not supported in '
             'LSF.',
-        clouds.CloudImplementationFeatures.OPEN_PORTS: 'Opening ports is not supported in LSF.',
-        clouds.CloudImplementationFeatures.HOST_CONTROLLERS: 'Running controllers is not well tested with LSF.',
+        clouds.CloudImplementationFeatures.OPEN_PORTS: 'Opening ports is not '
+                                                       'supported in LSF.',
+        clouds.CloudImplementationFeatures.HOST_CONTROLLERS:
+            'Running '
+            'controllers is not '
+            'well tested with '
+            'LSF.',
         clouds.CloudImplementationFeatures.LOCAL_DISK:
             (f'Local disk is not supported on {_REPR}'),
         clouds.CloudImplementationFeatures.DOCKER_IMAGE:
