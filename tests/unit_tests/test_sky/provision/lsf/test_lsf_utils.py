@@ -351,19 +351,87 @@ class TestBsubScriptSshServerSelection:
         assert '-r "$LSF_STATE_DIR/dropbear_host_key"' in script
         assert '$DROPBEARKEY_CMD -t ed25519' in script
 
-    def test_runtime_dir_published_via_port_map(self):
+    def test_runtime_dir_published_via_command_wrapper(self):
         """Neither server can inject env vars (PAM-forced sshd rejects
-        UsePAM=no; dropbear has no SetEnv), so sessions resolve the
-        runtime dir from the server port via a ~/.bashrc block."""
+        UsePAM=no; dropbear has no SetEnv) and EL9 bash does not source
+        ~/.bashrc for non-interactive SSH commands (live-verified empty
+        on DTU), so the authorized_keys command= wrapper -- honored
+        identically by OpenSSH and dropbear -- resolves the runtime dir
+        from the server port."""
         script = _build_script()
         assert '-o SetEnv' not in script
+        assert '.bashrc' not in script.replace('does not source ~/.bashrc', '')
         assert 'echo "$RUNTIME_DIR" > ~/.sky/lsf_ports/$PORT' in script
-        assert '# >>> skypilot-lsf-runtime >>>' in script
+        # Wrapper body: port -> runtime dir mapping, then exec
+        # pass-through (or a login shell for interactive sessions).
         assert '_sky_lsf_port=${SSH_CONNECTION##* }' in script
-        assert ('export SKY_RUNTIME_DIR='
+        assert ('SKY_RUNTIME_DIR='
                 '"$(cat "$HOME/.sky/lsf_ports/$_sky_lsf_port")"') in script
+        assert 'export SKY_RUNTIME_DIR' in script
+        assert 'exec /bin/sh -c "$SSH_ORIGINAL_COMMAND"' in script
+        assert 'exec "${SHELL:-/bin/sh}" -l' in script
         # Cleanup removes the port map entry.
         assert 'rm -f ~/.sky/lsf_ports/$PORT' in script
+
+    def test_tunnel_key_line_forces_wrapper(self):
+        script = _build_script()
+        enroll_line = ('echo "command=\\"$HOME/.sky/lsf/env_wrapper.sh\\" '
+                       '$(cat $LSF_STATE_DIR/tunnel_key.pub)"')
+        assert enroll_line in script
+        # Idempotence keys on the key material, not the whole line.
+        assert ('grep -qF "$(cat $LSF_STATE_DIR/tunnel_key.pub)" '
+                '~/.ssh/authorized_keys') in script
+        # The wrapper must be written before the key line that forces it.
+        assert (script.index("cat > ~/.sky/lsf/env_wrapper.sh") <
+                script.index(enroll_line))
+        # The auth self-test uses the tunnel key, so it exercises the
+        # wrapper's exec pass-through under the active server.
+        assert script.index(enroll_line) < script.index('auth_self_test()')
+
+
+class TestEnrollPublicKey:
+    """The SkyPilot runner key must force the env wrapper via command=."""
+
+    def _enroll(self, public_key='ssh-ed25519 AAAATESTKEY sky'):
+        client = mock.MagicMock()
+        client.run_raw.return_value = (0, '', '')
+        # pylint: disable=protected-access
+        lsf_instance._enroll_public_key(client, public_key + '\n')
+        return client.run_raw.call_args.args[0]
+
+    def test_wrapper_installed_with_key(self):
+        cmd = self._enroll()
+        # The wrapper is written (and made executable) in the same remote
+        # command as the key line, so the two never exist without each
+        # other.
+        assert 'printf %s ' in cmd
+        assert '> ~/.sky/lsf/env_wrapper.sh' in cmd
+        assert 'chmod 755 ~/.sky/lsf/env_wrapper.sh' in cmd
+        # Wrapper body ships verbatim: port map lookup + exec
+        # pass-through.
+        assert '_sky_lsf_port=${SSH_CONNECTION##* }' in cmd
+        assert 'exec /bin/sh -c "$SSH_ORIGINAL_COMMAND"' in cmd
+
+    def test_key_line_forces_wrapper_with_literal_home(self):
+        cmd = self._enroll()
+        # $HOME expands remotely at enroll time; authorized_keys command=
+        # takes no variables.
+        assert ('echo "command=\\"$HOME/.sky/lsf/env_wrapper.sh\\" "'
+                "'ssh-ed25519 AAAATESTKEY sky' >> ~/.ssh/authorized_keys"
+                in cmd)
+
+    def test_idempotence_keys_on_key_material(self):
+        cmd = self._enroll()
+        # grep on the bare key, not the command=-prefixed line, so
+        # re-enrollment never duplicates.
+        assert "grep -qF 'ssh-ed25519 AAAATESTKEY sky' " in cmd
+
+    def test_enroll_failure_raises(self):
+        client = mock.MagicMock()
+        client.run_raw.return_value = (1, '', 'permission denied')
+        with pytest.raises(Exception):
+            # pylint: disable=protected-access
+            lsf_instance._enroll_public_key(client, 'ssh-ed25519 AAAA x')
 
 
 class TestStageRemoteSshServer:

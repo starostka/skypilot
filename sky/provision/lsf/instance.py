@@ -110,6 +110,40 @@ def _skypilot_runtime_dir(tmpdir: Optional[str],
     return os.path.join(tmp, f'skypilot-lsf-{cluster_name_on_cloud}')
 
 
+# authorized_keys `command=` wrapper: the one env-injection mechanism that
+# OpenSSH and dropbear honor identically, independent of shell init. It is
+# required because (live-verified on DTU EL9): the RHEL sshd build forces
+# PAM and rejects `UsePAM=no` (so sshd SetEnv is unavailable to an
+# unprivileged server), dropbear has no SetEnv at all, and EL9 bash does
+# NOT source ~/.bashrc for non-interactive SSH commands. The wrapper lives
+# at a fixed shared-home path (cluster-independent: one enrolled key line
+# serves every cluster) and resolves the per-cluster runtime dir from the
+# server port the session came in through.
+_ENV_WRAPPER_HOME_REL_PATH = '.sky/lsf/env_wrapper.sh'
+
+
+def _env_wrapper_script() -> str:
+    """Render the authorized_keys command= env wrapper (POSIX sh)."""
+    var = skylet_constants.SKY_RUNTIME_DIR_ENV_VAR_KEY
+    return f"""\
+#!/bin/sh
+# Added by SkyPilot (LSF backend): forced authorized_keys command= for
+# SkyPilot's keys. Resolves the per-cluster runtime dir from the SSH
+# server port this session came in through, then runs the original
+# command unchanged (or a login shell for interactive sessions).
+_sky_lsf_port=${{SSH_CONNECTION##* }}
+if [ -n "$_sky_lsf_port" ] && [ -f "$HOME/.sky/lsf_ports/$_sky_lsf_port" ]; then
+    {var}="$(cat "$HOME/.sky/lsf_ports/$_sky_lsf_port")"
+    export {var}
+fi
+unset _sky_lsf_port
+if [ -n "${{SSH_ORIGINAL_COMMAND:-}}" ]; then
+    exec /bin/sh -c "$SSH_ORIGINAL_COMMAND"
+fi
+exec "${{SHELL:-/bin/sh}}" -l
+"""
+
+
 def _build_custom_bsub_directives(bsub_options: Dict[str, Any]) -> str:
     """Build #BSUB directive lines from user-supplied bsub_options.
 
@@ -293,7 +327,7 @@ def _build_bsub_script(
 
     extra_bsub_directives = _build_custom_bsub_directives(bsub_options)
 
-    runtime_dir_env_var = skylet_constants.SKY_RUNTIME_DIR_ENV_VAR_KEY
+    env_wrapper = _env_wrapper_script()
 
     # Optional dropbear fallback for sites whose OpenSSH build cannot run
     # as an unprivileged user (see the auth self-test in the script).
@@ -356,9 +390,20 @@ touch $SKY_CLUSTER_DIR/.hushlogin
 # $HOME is on a shared filesystem, so enrolling the public key here is
 # immediately honored by the login node's sshd.
 [ -f $LSF_STATE_DIR/tunnel_key ] || ssh-keygen -t ed25519 -f $LSF_STATE_DIR/tunnel_key -N '' -q
+
+# authorized_keys command= env wrapper (fixed shared-home path; idempotent
+# overwrite -- concurrent clusters write identical content). Must exist
+# before the tunnel key is enrolled below, whose key line forces it.
+mkdir -p ~/.sky/lsf ~/.sky/lsf_ports
+cat > ~/.sky/lsf/env_wrapper.sh <<'SKY_LSF_WRAPPER'
+{env_wrapper}SKY_LSF_WRAPPER
+chmod 755 ~/.sky/lsf/env_wrapper.sh
+
 mkdir -p ~/.ssh && chmod 700 ~/.ssh
 touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys
-grep -qF "$(cat $LSF_STATE_DIR/tunnel_key.pub)" ~/.ssh/authorized_keys || cat $LSF_STATE_DIR/tunnel_key.pub >> ~/.ssh/authorized_keys
+# command= must be a literal absolute path in authorized_keys; expand
+# $HOME here. Idempotence keys on the key material, not the whole line.
+grep -qF "$(cat $LSF_STATE_DIR/tunnel_key.pub)" ~/.ssh/authorized_keys || echo "command=\\"$HOME/.sky/lsf/env_wrapper.sh\\" $(cat $LSF_STATE_DIR/tunnel_key.pub)" >> ~/.ssh/authorized_keys
 
 SSHD_BIN=$(command -v sshd || echo /usr/sbin/sshd)
 # Optional dropbear fallback for sites whose OpenSSH build cannot serve
@@ -430,7 +475,9 @@ auth_self_test() {{
     # (observed on DTU EL9: the RHEL OpenSSH build forces PAM --
     # "'UsePAM no' is not supported in this build" -- publickey is
     # accepted, then the PAM account stage, which cannot run as
-    # non-root, rejects the session).
+    # non-root, rejects the session). The tunnel key's authorized_keys
+    # line forces the env wrapper, so this also proves the command=
+    # wrapper execs pass-through commands under the active server.
     ssh -i "$LSF_STATE_DIR/tunnel_key" -p "$1" \\
         -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \\
         -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=5 \\
@@ -505,31 +552,13 @@ if [ -z "$PORT" ]; then
     exit 1
 fi
 
-# Publish the runtime dir for incoming SSH sessions. Neither server can
-# inject env vars for us (RHEL sshd forces PAM and rejects UsePAM=no;
-# dropbear has no SetEnv), so sessions resolve it from the server port
-# they came in through: bash sources ~/.bashrc for non-interactive
-# SSH-spawned shells (SSH_SOURCE_BASHRC, enabled on Debian- and
-# RHEL-family builds), and the block below maps $SSH_CONNECTION's server
-# port to the per-cluster runtime dir.
-mkdir -p ~/.sky/lsf_ports
+# Publish the runtime dir for incoming SSH sessions. Sessions resolve it
+# via the authorized_keys command= wrapper (written above): it maps
+# $SSH_CONNECTION's server port to this file. Neither server can inject
+# env vars for us (RHEL sshd forces PAM and rejects UsePAM=no; dropbear
+# has no SetEnv), and EL9 bash does not source ~/.bashrc for
+# non-interactive SSH commands.
 echo "$RUNTIME_DIR" > ~/.sky/lsf_ports/$PORT
-touch ~/.bashrc
-if ! grep -qF "# >>> skypilot-lsf-runtime >>>" ~/.bashrc; then
-cat >> ~/.bashrc <<'SKY_LSF_BASHRC'
-# >>> skypilot-lsf-runtime >>>
-# Added by SkyPilot (LSF backend): resolve the per-cluster runtime dir
-# from the SSH server port this session came in through.
-if [ -n "${{SSH_CONNECTION:-}}" ]; then
-    _sky_lsf_port=${{SSH_CONNECTION##* }}
-    if [ -f "$HOME/.sky/lsf_ports/$_sky_lsf_port" ]; then
-        export {runtime_dir_env_var}="$(cat "$HOME/.sky/lsf_ports/$_sky_lsf_port")"
-    fi
-    unset _sky_lsf_port
-fi
-# <<< skypilot-lsf-runtime <<<
-SKY_LSF_BASHRC
-fi
 
 # Record the endpoint on the shared filesystem for the provisioner.
 cat > $LSF_STATE_DIR/endpoint.json <<EOF
@@ -556,13 +585,26 @@ def _enroll_public_key(client: 'lsf.LsfClient', public_key: str) -> None:
 
     The home directory is shared between login and compute nodes, so this
     single enrollment authorizes both the login-node ProxyCommand hop and
-    the in-job sshd.
+    the in-job sshd. The key line forces the env wrapper via command=
+    (see _env_wrapper_script), which is installed here first so the two
+    never exist without each other; sessions without a port mapping (the
+    login-node hop) pass through unchanged, and command= does not affect
+    the `ssh -W` ProxyCommand hop (a forwarding channel, no exec).
     """
     public_key = public_key.strip()
-    cmd = ('mkdir -p ~/.ssh && chmod 700 ~/.ssh && '
+    wrapper = _env_wrapper_script()
+    # command= must be a literal absolute path in authorized_keys; $HOME
+    # is expanded remotely at enroll time. Idempotence keys on the key
+    # material, not the whole line.
+    cmd = ('mkdir -p ~/.ssh ~/.sky/lsf ~/.sky/lsf_ports && '
+           'chmod 700 ~/.ssh && '
            'touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys '
+           f'&& printf %s {shlex.quote(wrapper)} '
+           f'> ~/{_ENV_WRAPPER_HOME_REL_PATH} '
+           f'&& chmod 755 ~/{_ENV_WRAPPER_HOME_REL_PATH} '
            f'&& (grep -qF {shlex.quote(public_key)} ~/.ssh/authorized_keys '
-           f'|| echo {shlex.quote(public_key)} >> ~/.ssh/authorized_keys)')
+           f'|| echo "command=\\"$HOME/{_ENV_WRAPPER_HOME_REL_PATH}\\" "'
+           f'{shlex.quote(public_key)} >> ~/.ssh/authorized_keys)')
     rc, stdout, stderr = client.run_raw(cmd)
     subprocess_utils.handle_returncode(
         rc,
