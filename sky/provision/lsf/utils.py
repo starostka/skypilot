@@ -19,6 +19,8 @@ DEFAULT_LSF_PATH = creds.DEFAULT_LSF_PATH
 LSF_MARKER_FILE = '.sky_lsf_cluster'
 
 _VAR_PATTERN = re.compile(r'\$(\w+|\{[^}]*\})')
+# Same shape as the Slurm backend's check: a POSIX-ish login name.
+_LSF_USER_PATTERN = re.compile(r'^[a-z_][a-z0-9_.-]*$')
 
 # Reverse-tunnel port selection: deterministic base derived from the LSF
 # job id, with linear probing on collision (both on the compute node and
@@ -229,9 +231,59 @@ def get_all_lsf_cluster_names() -> List[str]:
             f'{common_utils.format_exception(e)}') from e
 
 
+def get_submit_user(cluster_name: str) -> Optional[str]:
+    """Returns the calling SkyPilot user's Unix account for LSF submission.
+
+    Mirrors sky/provision/slurm/utils.py:get_submit_user. Gated on
+    `lsf.cluster_configs.<cluster>.submit_as_user`, which the schema has
+    always declared and nothing has ever read — so every LSF action ran as
+    whatever single account the credential source named, regardless of who
+    asked for it.
+
+    The name comes from the calling user's identity rather than the process
+    environment, so a multi-user API server resolves a different account per
+    caller instead of one account per deployment.
+
+    Returns None when the flag is off, meaning "use whatever user the
+    credential source specifies" — the previous behaviour.
+    """
+    enabled = skypilot_config.get_effective_region_config(
+        cloud='lsf',
+        region=cluster_name,
+        keys=('submit_as_user',),
+        default_value=False)
+    if not enabled:
+        return None
+
+    user_name = common_utils.get_current_user_name()
+    # SSO identities are email-shaped; the cluster account is the local part,
+    # matching how the Slurm backend derives it. Deployments that broker SSH
+    # certificates should sign for this same principal — if the certificate
+    # principal and the login account disagree, the certificate authenticates
+    # as nobody.
+    submit_user = user_name.split('@', 1)[0]
+    if _LSF_USER_PATTERN.fullmatch(submit_user) is None:
+        raise ValueError(
+            f'Cannot derive a valid Unix user from SkyPilot user '
+            f'{user_name!r}. LSF submit users must start with a lowercase '
+            'letter or "_" and contain only lowercase letters, digits, "_", '
+            '".", or "-".')
+    return submit_user
+
+
 def get_lsf_credentials(cluster: str) -> creds.LsfCredentials:
-    """Resolve login-node SSH credentials for an LSF cluster alias."""
-    return creds.get_provider().get_credentials(cluster)
+    """Resolve login-node SSH credentials for an LSF cluster alias.
+
+    When `submit_as_user` is on, the account is taken from the CALLING user
+    rather than from the credential source. This is the single chokepoint for
+    that decision — anything building a client from a raw ssh dict bypasses it
+    (see make_client_from_ssh_config).
+    """
+    credentials = creds.get_provider().get_credentials(cluster)
+    submit_user = get_submit_user(cluster)
+    if submit_user is not None and submit_user != credentials.user:
+        credentials = credentials._replace(user=submit_user)
+    return credentials
 
 
 def make_client(cluster: str) -> lsf.LsfClient:
@@ -249,12 +301,34 @@ def make_client(cluster: str) -> lsf.LsfClient:
 
 
 def make_client_from_ssh_config(
-        ssh_config_dict: Dict[str, Any]) -> lsf.LsfClient:
-    """Build an LsfClient from a provider config `ssh` dict."""
+        ssh_config_dict: Dict[str, Any],
+        cluster: Optional[str] = None) -> lsf.LsfClient:
+    """Build an LsfClient from a provider config `ssh` dict.
+
+    `cluster` is what makes this honour submit_as_user. The provider config is
+    written once at provision time and carries a FIXED user, so without the
+    cluster alias every call here runs as that one account no matter who is
+    asking — which is the confused-deputy shape this whole change exists to
+    remove. Callers that have the alias must pass it.
+    """
+    user = ssh_config_dict['user']
+    if cluster is not None:
+        submit_user = get_submit_user(cluster)
+        if submit_user is not None:
+            user = submit_user
+    else:
+        # No alias means there is no per-cluster config to consult, so the
+        # credential source's user stands — the behaviour before submit_as_user
+        # existed. Logged rather than silent: on a deployment that HAS enabled
+        # submit_as_user this is the one path that would still run as the
+        # shared account, and it should be findable.
+        logger.debug('LSF: no cluster alias supplied; submit_as_user cannot '
+                     'be applied and the configured user %r is used.',
+                     user)
     return lsf.LsfClient(
         ssh_config_dict['hostname'],
         int(ssh_config_dict['port']),
-        ssh_config_dict['user'],
+        user,
         ssh_config_dict.get('private_key', None),
         ssh_proxy_command=ssh_config_dict.get('proxycommand', None),
         ssh_proxy_jump=ssh_config_dict.get('proxyjump', None),
@@ -273,13 +347,14 @@ class QueueGpuInfo(NamedTuple):
 def get_configured_queues(cluster: str) -> Dict[str, QueueGpuInfo]:
     """Return the queue -> GPU map declared in the SkyPilot config.
 
-    LSF selects the GPU model by *queue* (e.g. DTU's gpuv100/gpua100/...),
+    LSF selects the GPU model by *queue* (sites commonly name them after the
+    accelerator, e.g. gpuv100/gpua100),
     and LSF itself has no first-class notion of a queue's GPU type; the
     mapping must therefore be declared in the config:
 
         lsf:
           cluster_configs:
-            dtu:
+            mycluster:
               queues:
                 hpc: {}
                 gpuv100: {gpus: V100, gpu_count: 2}

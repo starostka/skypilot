@@ -2152,6 +2152,9 @@ def get_config_schema():
                 'provision_timeout': {
                     'type': 'integer',
                 },
+                'submit_as_user': {
+                    'type': 'boolean',
+                },
                 'default_walltime': {
                     'type': 'string',
                 },
@@ -2172,6 +2175,9 @@ def get_config_schema():
                             },
                             'tmpdir': {
                                 'type': 'string',
+                            },
+                            'submit_as_user': {
+                                'type': 'boolean',
                             },
                             'default_walltime': {
                                 'type': 'string',

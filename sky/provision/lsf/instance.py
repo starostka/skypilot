@@ -721,7 +721,8 @@ def _create_virtual_instance(
     """
     provider_config = config.provider_config
     queue = lsf_utils.get_queue_from_config(provider_config)
-    client = lsf_utils.make_client_from_ssh_config(provider_config['ssh'])
+    client = lsf_utils.make_client_from_ssh_config(
+        provider_config['ssh'], provider_config.get('cluster'))
 
     num_nodes = config.count
     if num_nodes != 1:
@@ -943,7 +944,8 @@ def query_instances(
     """See sky/provision/__init__.py"""
     del cluster_name, retry_if_missing  # Unused for LSF
     assert provider_config is not None, (cluster_name_on_cloud, provider_config)
-    client = lsf_utils.make_client_from_ssh_config(provider_config['ssh'])
+    client = lsf_utils.make_client_from_ssh_config(
+        provider_config['ssh'], provider_config.get('cluster'))
 
     jobs = client.query_jobs_by_name(cluster_name_on_cloud,
                                      include_finished=True)
@@ -979,7 +981,8 @@ def get_cluster_info(
         cluster_name_on_cloud: str,
         provider_config: Optional[Dict[str, Any]] = None) -> common.ClusterInfo:
     assert provider_config is not None, cluster_name_on_cloud
-    client = lsf_utils.make_client_from_ssh_config(provider_config['ssh'])
+    client = lsf_utils.make_client_from_ssh_config(
+        provider_config['ssh'], provider_config.get('cluster'))
 
     running_jobs = [
         j for j in client.query_jobs_by_name(cluster_name_on_cloud)
@@ -1079,7 +1082,8 @@ def terminate_instances(
             'worker_only=True is not supported for LSF, this is a no-op.')
         return
 
-    client = lsf_utils.make_client_from_ssh_config(provider_config['ssh'])
+    client = lsf_utils.make_client_from_ssh_config(
+        provider_config['ssh'], provider_config.get('cluster'))
 
     jobs = client.query_jobs_by_name(cluster_name_on_cloud)
     if not jobs:

@@ -9,9 +9,9 @@ secret manager) without touching the rest of the backend.
 The default provider mirrors the Slurm backend: a static SSH-config-format
 file at ``~/.lsf/config``, where each ``Host`` alias names one LSF cluster:
 
-    Host dtu
-        HostName login1.hpc.dtu.dk
-        User bstja
+    Host mycluster
+        HostName login1.hpc.example.edu
+        User alice
         IdentityFile ~/.ssh/id_ed25519
 """
 
@@ -33,7 +33,7 @@ class LsfCredentials(NamedTuple):
     # Path to the SSH private key, or None for ssh-agent/keyless auth.
     identity_file: Optional[str]
     # Path to an SSH certificate, for deployments using a CA-based flow
-    # (e.g. keys signed by OpenBao/Vault). Optional and currently only
+    # (e.g. keys signed by an SSH CA). Optional and currently only
     # carried through; the default OpenSSH client picks up `<key>-cert.pub`
     # automatically.
     cert_file: Optional[str]
@@ -105,15 +105,54 @@ class SSHConfigCredentialProvider(CredentialProvider):
         )
 
 
-_provider: CredentialProvider = SSHConfigCredentialProvider()
+# A deployment that brokers credentials from a secret store (short-lived SSH
+# certificates, per-user keys) plugs in here instead of vendoring its
+# integration into this backend. Point it at a factory:
+#
+#   SKYPILOT_LSF_CREDENTIAL_PROVIDER=my_platform.lsf_creds:make_provider
+#
+# The factory takes no arguments and returns a CredentialProvider. It is
+# resolved once, on first use, so an import error surfaces at the first LSF
+# operation rather than at interpreter start.
+CREDENTIAL_PROVIDER_ENV_VAR = 'SKYPILOT_LSF_CREDENTIAL_PROVIDER'
+
+_provider: Optional[CredentialProvider] = None
+_provider_explicitly_set = False
+
+
+def _load_provider_from_env() -> Optional[CredentialProvider]:
+    spec = os.environ.get(CREDENTIAL_PROVIDER_ENV_VAR, '').strip()
+    if not spec:
+        return None
+    if ':' not in spec:
+        raise ValueError(
+            f'{CREDENTIAL_PROVIDER_ENV_VAR} must be "module:callable", '
+            f'got {spec!r}.')
+    module_name, _, attr = spec.partition(':')
+    # pylint: disable-next=import-outside-toplevel
+    import importlib
+    module = importlib.import_module(module_name)
+    factory = getattr(module, attr)
+    provider = factory()
+    if not isinstance(provider, CredentialProvider):
+        raise TypeError(
+            f'{spec} returned {type(provider).__name__}, which is not a '
+            'CredentialProvider.')
+    return provider
 
 
 def get_provider() -> CredentialProvider:
     """Returns the active credential provider."""
+    global _provider
+    if _provider is None:
+        # An explicit set_provider() always wins over the environment.
+        _provider = (_load_provider_from_env() or
+                     SSHConfigCredentialProvider())
     return _provider
 
 
 def set_provider(provider: CredentialProvider) -> None:
     """Replaces the active credential provider (e.g. for a platform plugin)."""
-    global _provider
+    global _provider, _provider_explicitly_set
     _provider = provider
+    _provider_explicitly_set = True

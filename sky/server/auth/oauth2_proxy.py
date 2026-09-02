@@ -168,6 +168,15 @@ class OAuth2ProxyMiddleware(starlette.middleware.base.BaseHTTPMiddleware):
                     await asyncio.to_thread(permission.seed_new_user_role,
                                             auth_user.id)
                 request.state.auth_user = auth_user
+                # Keep the caller's access token for the request's lifetime.
+                # A backend that brokers a downstream credential on the user's
+                # behalf must present the CALLER's token rather than a service
+                # token: a secret store binds what it issues to the presenting
+                # token's identity, so a service token would let the server
+                # obtain a credential for anyone — a confused deputy.
+                # oauth2-proxy only sends this when --pass-access-token=true.
+                request.state.auth_access_token = auth_response.headers.get(
+                    'X-Auth-Request-Access-Token')
                 return await call_next(request)
             elif auth_response.status == http.HTTPStatus.UNAUTHORIZED:
                 # For /api/health, we should allow unauthenticated requests to
