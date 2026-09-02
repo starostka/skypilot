@@ -281,8 +281,14 @@ def get_lsf_credentials(cluster: str) -> creds.LsfCredentials:
     """
     credentials = creds.get_provider().get_credentials(cluster)
     submit_user = get_submit_user(cluster)
-    if submit_user is not None and submit_user != credentials.user:
-        credentials = credentials._replace(user=submit_user)
+    user = submit_user or credentials.user
+    if user is None:
+        raise ValueError(
+            f'No account for LSF cluster {cluster!r}: the credential source '
+            'specifies no User and submit_as_user is not enabled. Set one or '
+            'the other.')
+    if user != credentials.user:
+        credentials = credentials._replace(user=user)
     return credentials
 
 

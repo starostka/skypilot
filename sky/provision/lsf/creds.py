@@ -29,7 +29,9 @@ class LsfCredentials(NamedTuple):
     """SSH credentials for an LSF login node."""
     host: str
     port: int
-    user: str
+    # None when the credential source names no account — valid only if
+    # submit_as_user supplies one; see get_lsf_credentials().
+    user: Optional[str]
     # Path to the SSH private key, or None for ssh-agent/keyless auth.
     identity_file: Optional[str]
     # Path to an SSH certificate, for deployments using a CA-based flow
@@ -96,7 +98,13 @@ class SSHConfigCredentialProvider(CredentialProvider):
         return LsfCredentials(
             host=config_dict['hostname'],
             port=int(config_dict.get('port', 22)),
-            user=config_dict['user'],
+            # Optional: with submit_as_user the account comes from the
+            # caller, so a config that omits User is valid. Slurm gets this
+            # for free from `slurm_user or ssh_config_dict['user']`
+            # short-circuiting; this provider builds the whole record up
+            # front, so the lookup has to be lenient here and the absence
+            # resolved in get_lsf_credentials().
+            user=config_dict.get('user'),
             identity_file=identity_file,
             cert_file=cert_file,
             proxy_command=config_dict.get('proxycommand', None),
