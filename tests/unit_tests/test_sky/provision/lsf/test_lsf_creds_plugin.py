@@ -74,3 +74,29 @@ def test_factory_returning_wrong_type_raises():
                          {creds.CREDENTIAL_PROVIDER_ENV_VAR: spec}):
         with pytest.raises(TypeError, match='not a CredentialProvider'):
             creds.get_provider()
+
+
+def test_check_skips_the_probe_when_credentials_are_per_user():
+    """`sky check` must not require the SERVER to be able to log in.
+
+    The probe opens a connection as the server, which presumes a shared
+    account. Where a credential provider issues per-caller credentials no such
+    account exists, and there is no caller during `sky check` — so a correctly
+    configured deployment would be reported disabled and every launch refused.
+    """
+    from sky.clouds import lsf as lsf_cloud
+
+    with mock.patch.object(lsf_cloud.lsf_utils, 'get_all_lsf_cluster_names',
+                           return_value=['dtu']), \
+         mock.patch.object(lsf_cloud.Lsf, 'existing_allowed_clusters',
+                           classmethod(lambda cls: ['dtu'])), \
+         mock.patch.object(lsf_cloud.lsf_utils, 'make_client') as probe, \
+         mock.patch.dict(os.environ,
+                         {creds.CREDENTIAL_PROVIDER_ENV_VAR:
+                          f'{__name__}:make_provider'}):
+        ok, detail = lsf_cloud.Lsf._check_compute_credentials()
+
+    assert ok is True
+    assert 'dtu' in detail
+    # The point: no connection was attempted.
+    probe.assert_not_called()

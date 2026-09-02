@@ -1,5 +1,6 @@
 """IBM Spectrum LSF."""
 
+import os
 import typing
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
@@ -8,6 +9,7 @@ from sky import clouds
 from sky import exceptions
 from sky import sky_logging
 from sky import skypilot_config
+from sky.provision.lsf import creds
 from sky.provision.lsf import utils as lsf_utils
 from sky.utils import annotations
 from sky.utils import common_utils
@@ -563,6 +565,24 @@ class Lsf(clouds.Cloud):
         if not existing_allowed_clusters:
             return (False, 'No allowed LSF clusters found in '
                     f'{lsf_utils.DEFAULT_LSF_PATH}.')
+
+        # A DEPLOYMENT THAT BROKERS PER-USER CREDENTIALS CANNOT BE PROBED HERE.
+        # The loop below opens a connection AS THE SERVER, which presumes a
+        # shared account the server can log in with. Where credentials are
+        # issued per caller (creds.CREDENTIAL_PROVIDER_ENV_VAR), no such
+        # account exists and there is no caller during `sky check`, so the
+        # probe fails for a deployment that is correctly configured — and the
+        # cloud is then reported disabled and every launch refused.
+        #
+        # Validate what CAN be checked without an identity: the config names
+        # clusters, and those clusters are allowed. Whether a given user may
+        # actually log in is answered at request time, by the store, against
+        # that user's own token — which is the only place it can be answered.
+        if os.environ.get(creds.CREDENTIAL_PROVIDER_ENV_VAR):
+            return True, {
+                cluster: 'enabled (per-user credentials; not probed)'
+                for cluster in existing_allowed_clusters
+            }
 
         # Check credentials for each cluster and return a ctx2text mapping.
         ctx2text = {}
