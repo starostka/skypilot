@@ -49,6 +49,7 @@ from sky.server import metrics as metrics_lib
 from sky.server import plugins
 from sky.server import versions
 from sky.server.requests import payloads
+from sky.server.requests import request_env
 from sky.server.requests import preconditions
 from sky.server.requests import process
 from sky.server.requests import request_names
@@ -1066,6 +1067,11 @@ async def prepare_request_async(
         # Set user identity for executors.
         request_body.env_vars[constants.USER_ID_ENV_VAR] = user_id
         request_body.env_vars[constants.USER_ENV_VAR] = auth_user.name
+        # A deployment may need to carry more than the name across the
+        # process boundary — e.g. a credential brokered for this caller,
+        # which exists only in the server's request context. See
+        # sky/server/requests/request_env.py.
+        request_env.contribute(request_body.env_vars)
     else:
         # Fallback to legacy environment variable based identity if no
         # authentication is set.
