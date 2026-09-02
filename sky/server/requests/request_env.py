@@ -10,8 +10,15 @@ A deployment names a callable::
 
     SKYPILOT_REQUEST_ENV_HOOK=my_platform.creds:contribute_env
 
-It takes no arguments (it reads the server's request context itself) and
-returns a ``Dict[str, str]`` merged into the request's env_vars.
+It receives the caller's access token (or None) and returns a
+``Dict[str, str]`` merged into the request's env_vars.
+
+The token is passed EXPLICITLY rather than read from ambient state. The
+obvious alternative — stashing it in a context variable from middleware —
+is unsafe here: sky.utils.context falls back to a PROCESS-GLOBAL dict when
+no context is active, and the server initialises a context inside request
+handlers rather than in middleware. One caller's credential would then be
+readable by another caller's request.
 
 Two deliberate choices:
 
@@ -35,11 +42,11 @@ logger = sky_logging.init_logger(__name__)
 
 REQUEST_ENV_HOOK_ENV_VAR = 'SKYPILOT_REQUEST_ENV_HOOK'
 
-_hook: Optional[Callable[[], Dict[str, str]]] = None
+_hook: Optional[Callable[[Optional[str]], Dict[str, str]]] = None
 _resolved = False
 
 
-def _resolve() -> Optional[Callable[[], Dict[str, str]]]:
+def _resolve() -> Optional[Callable[[Optional[str]], Dict[str, str]]]:
     global _hook, _resolved
     if _resolved:
         return _hook
@@ -59,12 +66,22 @@ def _resolve() -> Optional[Callable[[], Dict[str, str]]]:
     return _hook
 
 
-def contribute(env_vars: Dict[str, str]) -> None:
-    """Merges the plugin's contribution into a request's env_vars, in place."""
+def contribute(env_vars: Dict[str, str],
+               access_token: Optional[str] = None) -> None:
+    """Merges the plugin's contribution into a request's env_vars, in place.
+
+    Args:
+        env_vars: the request's env_vars, mutated in place.
+        access_token: the CALLER's access token, or None when the request
+            carries no user credential. A hook that brokers a downstream
+            credential must present this rather than a service token: a secret
+            store binds what it issues to the presenting identity, so a service
+            token would let the server obtain a credential for anyone.
+    """
     hook = _resolve()
     if hook is None:
         return
-    extra = hook()
+    extra = hook(access_token)
     if not extra:
         return
     for key, value in extra.items():

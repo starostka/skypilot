@@ -372,6 +372,10 @@ class InitializeRequestAuthUserMiddleware(
         # Make sure that request.state.auth_user is set. Otherwise, we may get a
         # KeyError while trying to read it.
         request.state.auth_user = None
+        # Same for the caller's access token: an auth middleware fills it in
+        # when the deployment forwards one, and a backend that brokers a
+        # downstream credential presents it on the caller's behalf.
+        request.state.auth_access_token = None
         return await call_next(request)
 
 
@@ -650,6 +654,17 @@ class AuthProxyMiddleware(starlette.middleware.base.BaseHTTPMiddleware):
             return await call_next(request)
 
         auth_user = _extract_user_from_header(request, self.config)
+
+        # An external proxy authenticates the request and forwards the client's
+        # own Authorization header. Keep that token for the request's lifetime,
+        # the same way the oauth2-proxy path keeps X-Auth-Request-Access-Token:
+        # a backend brokering a downstream credential must present the CALLER's
+        # token, never a service token, or the server can obtain a credential
+        # for anyone.
+        if getattr(request.state, 'auth_access_token', None) is None:
+            _authz = request.headers.get('Authorization', '')
+            if _authz.lower().startswith('bearer '):
+                request.state.auth_access_token = _authz[len('bearer '):]
 
         if request.state.auth_user is not None:
             # Previous middleware is trusted more than this middleware.  For
@@ -2004,6 +2019,7 @@ async def launch(launch_body: payloads.LaunchBody,
         request_cluster_name=launch_body.cluster_name,
         retryable=launch_body.retry_until_up,
         auth_user=request.state.auth_user,
+        auth_access_token=request.state.auth_access_token,
     )
 
 
@@ -2055,6 +2071,7 @@ async def exec(request: fastapi.Request, exec_body: payloads.ExecBody) -> None:
         schedule_type=requests_lib.ScheduleType.LONG,
         request_cluster_name=cluster_name,
         auth_user=request.state.auth_user,
+        auth_access_token=request.state.auth_access_token,
     )
 
 

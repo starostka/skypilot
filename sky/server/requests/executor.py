@@ -1057,6 +1057,7 @@ async def prepare_request_async(
     schedule_type: api_requests.ScheduleType = (api_requests.ScheduleType.LONG),
     is_skypilot_system: bool = False,
     auth_user: Optional[models.User] = None,
+    auth_access_token: Optional[str] = None,
 ) -> api_requests.Request:
     """Prepare a request for execution."""
     if auth_user is not None:
@@ -1071,7 +1072,8 @@ async def prepare_request_async(
         # process boundary — e.g. a credential brokered for this caller,
         # which exists only in the server's request context. See
         # sky/server/requests/request_env.py.
-        request_env.contribute(request_body.env_vars)
+        request_env.contribute(request_body.env_vars,
+                               auth_access_token)
     else:
         # Fallback to legacy environment variable based identity if no
         # authentication is set.
@@ -1130,7 +1132,8 @@ async def schedule_request_async(
         is_skypilot_system: bool = False,
         precondition: Optional[preconditions.Precondition] = None,
         retryable: bool = False,
-        auth_user: Optional[models.User] = None) -> None:
+        auth_user: Optional[models.User] = None,
+        auth_access_token: Optional[str] = None) -> None:
     """Enqueue a request to the request queue.
 
     Args:
@@ -1146,6 +1149,10 @@ async def schedule_request_async(
         schedule_type: The type of scheduling to use for this request, refer to
             `api_requests.ScheduleType` for more details.
         is_skypilot_system: Denote whether the request is from SkyPilot system.
+        auth_access_token: The CALLER's access token, passed to the deployment's
+            per-request env hook so a backend can broker a downstream
+            credential on the caller's behalf. Passed explicitly rather than
+            read from ambient state — see sky/server/requests/request_env.py.
         precondition: If a precondition is provided, the request will only be
             scheduled for execution when the precondition is met (returns True).
             The precondition is waited asynchronously and does not block the
@@ -1158,7 +1165,8 @@ async def schedule_request_async(
                                                request_cluster_name,
                                                schedule_type,
                                                is_skypilot_system,
-                                               auth_user=auth_user)
+                                               auth_user=auth_user,
+                                               auth_access_token=auth_access_token)
     await schedule_prepared_request(request_task, ignore_return_value,
                                     precondition, retryable)
 
