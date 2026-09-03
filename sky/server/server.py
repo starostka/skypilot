@@ -676,7 +676,20 @@ class AuthProxyMiddleware(starlette.middleware.base.BaseHTTPMiddleware):
             else:
                 _authz = request.headers.get('Authorization', '')
                 if _authz.lower().startswith('bearer '):
-                    request.state.auth_access_token = _authz[len('bearer '):]
+                    # STRIP AND REQUIRE NON-EMPTY. oauth2-proxy's
+                    # --pass-authorization-header writes the header from the
+                    # session's ID token, and a session built from a bearer via
+                    # --skip-jwt-bearer-tokens may hold none — producing the
+                    # literal "Bearer " with nothing after it.
+                    #
+                    # Storing that empty string is worse than storing nothing:
+                    # it is not None, so it silences the diagnostic below, and
+                    # it is falsy, so the hook contributes nothing. The result
+                    # is a backend refusing for want of a credential while the
+                    # server believes it captured one.
+                    _tok = _authz[len('bearer '):].strip()
+                    if _tok:
+                        request.state.auth_access_token = _tok
 
             if request.state.auth_access_token is None:
                 # SAY SO, ONCE, WITH THE EVIDENCE. A request can be fully
@@ -697,6 +710,15 @@ class AuthProxyMiddleware(starlette.middleware.base.BaseHTTPMiddleware):
                     '--pass-authorization-header forwards the original.',
                     sorted(k for k in request.headers
                            if 'auth' in k.lower() or 'forward' in k.lower()))
+                _authz_dbg = request.headers.get('Authorization', '')
+                if _authz_dbg.lower().startswith('bearer ') and not _authz_dbg[
+                        len('bearer '):].strip():
+                    logger.warning(
+                        'The Authorization header is present but its bearer '
+                        'value is EMPTY. oauth2-proxy sends this when '
+                        '--pass-authorization-header is set and the session '
+                        'holds no ID token, which is the case for a session '
+                        'built from a bearer via --skip-jwt-bearer-tokens.')
 
         if request.state.auth_user is not None:
             # Previous middleware is trusted more than this middleware.  For

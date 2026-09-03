@@ -127,7 +127,9 @@ def _capture(headers):
     else:
         authz = headers.get('Authorization', '')
         if authz.lower().startswith('bearer '):
-            state.auth_access_token = authz[len('bearer '):]
+            tok = authz[len('bearer '):].strip()
+            if tok:
+                state.auth_access_token = tok
     return state.auth_access_token
 
 
@@ -154,3 +156,21 @@ def test_proxy_header_wins_over_a_client_supplied_authorization():
         'X-Auth-Request-Access-Token': 'from-proxy',
         'Authorization': 'Bearer from-client',
     }) == 'from-proxy'
+
+
+
+def test_an_empty_bearer_is_treated_as_absent():
+    """oauth2-proxy sends "Bearer " with nothing after it when
+    --pass-authorization-header is set and the session holds no ID token —
+    which is the case for a session built from a bearer via
+    --skip-jwt-bearer-tokens.
+
+    Storing that empty string is worse than storing nothing: it is not None so
+    it silences the "no access token" diagnostic, and it is falsy so the hook
+    contributes nothing. The backend then refuses for want of a credential
+    while the server believes it captured one — which is precisely how this
+    went unexplained across several deploys.
+    """
+    assert _capture({'Authorization': 'Bearer '}) is None
+    assert _capture({'Authorization': 'Bearer    '}) is None
+    assert _capture({'Authorization': 'Bearer  tok  '}) == 'tok'
