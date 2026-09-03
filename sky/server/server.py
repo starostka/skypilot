@@ -667,8 +667,23 @@ class AuthProxyMiddleware(starlette.middleware.base.BaseHTTPMiddleware):
         # supplies its own header instead. A generic proxy simply passes the
         # original through. Try each in turn rather than assume a topology.
         if getattr(request.state, 'auth_access_token', None) is None:
-            for _h in ('X-Auth-Request-Access-Token',
-                       'X-Forwarded-Access-Token'):
+            # A deployment whose proxy cannot supply the token at all names a
+            # header its clients set directly. oauth2-proxy forwards headers it
+            # does not manage, so this survives where the proxy's own cannot:
+            # a session built from a bearer via --skip-jwt-bearer-tokens holds
+            # neither an access token nor an ID token, so --pass-access-token
+            # and --pass-authorization-header both send nothing usable.
+            #
+            # TRUST NOTE. This value is client-supplied, whereas identity comes
+            # from the proxy. They can disagree — a caller could present another
+            # user's token — but doing so requires possessing that token, which
+            # is equivalent to being that user, and the secret store binds what
+            # it issues to the token's own subject. It is NOT a way to obtain a
+            # credential you could not otherwise obtain.
+            _extra = os.environ.get('SKYPILOT_AUTH_TOKEN_HEADER', '').strip()
+            _candidates = ([_extra] if _extra else []) + [
+                'X-Auth-Request-Access-Token', 'X-Forwarded-Access-Token']
+            for _h in _candidates:
                 _v = request.headers.get(_h, '').strip()
                 if _v:
                     request.state.auth_access_token = _v
