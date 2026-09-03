@@ -81,7 +81,18 @@ def contribute(env_vars: Dict[str, str],
     hook = _resolve()
     if hook is None:
         return
+    # THE EXACT JUNCTION. A hook that is configured and a caller that is
+    # authenticated can still yield no credential, and until now nothing said
+    # which side was empty: the middleware logs only when it captures nothing,
+    # and the hook returns {} silently for an absent token. Both look identical
+    # downstream — a backend refusing for want of a credential.
+    #
+    # Length, never the value: this is a bearer token.
+    logger.warning('request env hook: token %s',
+                   f'present (len {len(access_token)})' if access_token
+                   else repr(access_token))
     extra = hook(access_token)
+    logger.warning('request env hook contributed: %s', sorted(extra or {}))
     if not extra:
         return
     for key, value in extra.items():
