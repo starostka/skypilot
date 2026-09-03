@@ -678,6 +678,26 @@ class AuthProxyMiddleware(starlette.middleware.base.BaseHTTPMiddleware):
                 if _authz.lower().startswith('bearer '):
                     request.state.auth_access_token = _authz[len('bearer '):]
 
+            if request.state.auth_access_token is None:
+                # SAY SO, ONCE, WITH THE EVIDENCE. A request can be fully
+                # authenticated while carrying no token the server can forward,
+                # and the only symptom is a backend failing much later with "no
+                # credential" — which reads as a broken backend rather than a
+                # proxy that was never asked to pass the token on.
+                #
+                # Names only, never values: these headers carry bearer tokens.
+                logger.warning(
+                    'Authenticated request carries no access token. The '
+                    'per-request env hook will contribute nothing and a '
+                    'backend brokering a downstream credential will refuse. '
+                    'Auth-related headers present: %s. If the proxy is '
+                    'oauth2-proxy, --pass-access-token only forwards a token '
+                    'the SESSION holds, and a session built from a bearer via '
+                    '--skip-jwt-bearer-tokens may hold none; '
+                    '--pass-authorization-header forwards the original.',
+                    sorted(k for k in request.headers
+                           if 'auth' in k.lower() or 'forward' in k.lower()))
+
         if request.state.auth_user is not None:
             # Previous middleware is trusted more than this middleware.  For
             # instance, a client could set the Authorization and the
