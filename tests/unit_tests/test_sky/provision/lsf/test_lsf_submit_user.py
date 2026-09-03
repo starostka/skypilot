@@ -100,3 +100,23 @@ def test_a_config_using_the_flag_validates():
     jsonschema.validate(
         {'lsf': {'cluster_configs': {'mycluster': {'submit_as_user': True}}}},
         schemas.get_config_schema())
+
+
+def test_optimizer_can_evaluate_lsf_resources():
+    """The optimizer must be able to ask LSF what it does not support.
+
+    check_features_are_supported() calls _unsupported_features_for_resources()
+    for every candidate. Leaving it to the base class raises a bare
+    NotImplementedError from inside the optimizer, and a launch then fails with
+    an EMPTY message — no cloud named, no feature named, nothing to act on.
+    """
+    import sky
+    from sky.clouds import lsf as lsf_cloud
+
+    r = sky.Resources(infra='lsf/dtu', cpus='1')
+    unsupported = lsf_cloud.Lsf._unsupported_features_for_resources(r)
+
+    assert isinstance(unsupported, dict)
+    # A property of the backend, not of a cluster: no connection is needed to
+    # answer, which is why this is returned statically.
+    assert lsf_cloud.clouds.CloudImplementationFeatures.STOP in unsupported

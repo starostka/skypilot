@@ -67,6 +67,29 @@ class Lsf(clouds.Cloud):
             '(jobs are submitted with span[hosts=1]).',
     }
     _MAX_CLUSTER_NAME_LEN_LIMIT = 120
+
+    @classmethod
+    def _unsupported_features_for_resources(
+        cls,
+        resources: 'resources_lib.Resources',
+        region: Optional[str] = None,
+    ) -> Dict[clouds.CloudImplementationFeatures, str]:
+        """The features this backend does not support.
+
+        Required by the base class: check_features_are_supported() calls it for
+        every candidate, so leaving it unimplemented raises a bare
+        NotImplementedError from inside the optimizer — which surfaces as a
+        launch failing with an empty message and no indication of the cause.
+
+        Returned STATICALLY, unlike Slurm's version which probes each cluster
+        for Pyxis and FUSE. That probe opens a connection, and this backend's
+        credentials are issued per request to the calling user; making the
+        optimizer connect would be both slow and wrong here. Everything LSF
+        cannot do is a property of the backend rather than of a given cluster,
+        so the declared set is the whole answer.
+        """
+        del region  # Uniform across clusters; see above.
+        return dict(cls._CLOUD_UNSUPPORTED_FEATURES)
     _regions: List[clouds.Region] = []
     _INDENT_PREFIX = '    '
 
