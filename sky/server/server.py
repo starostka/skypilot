@@ -655,16 +655,28 @@ class AuthProxyMiddleware(starlette.middleware.base.BaseHTTPMiddleware):
 
         auth_user = _extract_user_from_header(request, self.config)
 
-        # An external proxy authenticates the request and forwards the client's
-        # own Authorization header. Keep that token for the request's lifetime,
-        # the same way the oauth2-proxy path keeps X-Auth-Request-Access-Token:
-        # a backend brokering a downstream credential must present the CALLER's
-        # token, never a service token, or the server can obtain a credential
-        # for anyone.
+        # Keep the CALLER's access token for the request's lifetime, so a
+        # backend brokering a downstream credential presents that rather than a
+        # service token — otherwise the server can obtain a credential for
+        # anyone.
+        #
+        # WHICH HEADER CARRIES IT DEPENDS ON THE PROXY, and reading only one is
+        # how this silently produced no credential at all: oauth2-proxy does
+        # NOT forward the client's Authorization header unless
+        # --pass-authorization-header is set, and with --pass-access-token it
+        # supplies its own header instead. A generic proxy simply passes the
+        # original through. Try each in turn rather than assume a topology.
         if getattr(request.state, 'auth_access_token', None) is None:
-            _authz = request.headers.get('Authorization', '')
-            if _authz.lower().startswith('bearer '):
-                request.state.auth_access_token = _authz[len('bearer '):]
+            for _h in ('X-Auth-Request-Access-Token',
+                       'X-Forwarded-Access-Token'):
+                _v = request.headers.get(_h, '').strip()
+                if _v:
+                    request.state.auth_access_token = _v
+                    break
+            else:
+                _authz = request.headers.get('Authorization', '')
+                if _authz.lower().startswith('bearer '):
+                    request.state.auth_access_token = _authz[len('bearer '):]
 
         if request.state.auth_user is not None:
             # Previous middleware is trusted more than this middleware.  For

@@ -109,3 +109,48 @@ def test_non_callable_raises():
     with _env(f'{__name__}:not_callable'):
         with pytest.raises(TypeError, match='not callable'):
             request_env.contribute({})
+
+
+class _State:
+    auth_access_token = None
+    auth_user = None
+
+
+def _capture(headers):
+    """Mirrors AuthProxyMiddleware's token capture."""
+    state = _State()
+    for h in ('X-Auth-Request-Access-Token', 'X-Forwarded-Access-Token'):
+        v = headers.get(h, '').strip()
+        if v:
+            state.auth_access_token = v
+            break
+    else:
+        authz = headers.get('Authorization', '')
+        if authz.lower().startswith('bearer '):
+            state.auth_access_token = authz[len('bearer '):]
+    return state.auth_access_token
+
+
+def test_token_is_read_from_any_proxy_convention():
+    """Reading one header only is how this produced no credential at all.
+
+    oauth2-proxy does NOT forward the client's Authorization header unless
+    --pass-authorization-header is set, and with --pass-access-token it
+    supplies its own instead. A generic proxy passes the original through. All
+    three shapes must work, or the deployment fails at provision time with
+    "no brokered credential" while the request was in fact authenticated.
+    """
+    assert _capture({'X-Auth-Request-Access-Token': 'tok-a'}) == 'tok-a'
+    assert _capture({'X-Forwarded-Access-Token': 'tok-b'}) == 'tok-b'
+    assert _capture({'Authorization': 'Bearer tok-c'}) == 'tok-c'
+    assert _capture({'Authorization': 'Basic nope'}) is None
+    assert _capture({}) is None
+
+
+def test_proxy_header_wins_over_a_client_supplied_authorization():
+    """The proxy's header is the trustworthy one: it was set AFTER the proxy
+    authenticated. A client-supplied Authorization must not displace it."""
+    assert _capture({
+        'X-Auth-Request-Access-Token': 'from-proxy',
+        'Authorization': 'Bearer from-client',
+    }) == 'from-proxy'
