@@ -655,6 +655,22 @@ class AuthProxyMiddleware(starlette.middleware.base.BaseHTTPMiddleware):
 
         auth_user = _extract_user_from_header(request, self.config)
 
+        # NO IDENTITY MEANS THE HOOK NEVER RUNS. prepare_request_async only
+        # calls request_env.contribute() when auth_user is set, so a proxy that
+        # authenticates but forwards no identity header produces a request that
+        # looks fine and carries no credential — and nothing downstream says
+        # why. Note SKYPILOT_USER in a request's env_vars proves nothing here:
+        # the CLIENT sets it.
+        #
+        # Every header NAME, unfiltered: a filtered list cannot distinguish
+        # "absent" from "present under a name the filter does not match", and
+        # that ambiguity has cost several rounds. Names only, never values.
+        if auth_user is None:
+            logger.warning(
+                'No identity header %r; request env hook will be SKIPPED. '
+                'Headers received: %s', self.config.header_name,
+                sorted(request.headers.keys()))
+
         # Keep the CALLER's access token for the request's lifetime, so a
         # backend brokering a downstream credential presents that rather than a
         # service token — otherwise the server can obtain a credential for
