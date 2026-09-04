@@ -331,7 +331,9 @@ def _build_bsub_script(
 
     # Optional dropbear fallback for sites whose OpenSSH build cannot run
     # as an unprivileged user (see the auth self-test in the script).
-    remote_ssh_server_sh = (shlex.quote(remote_ssh_server)
+    # Same tilde rule as every other remote path: the script runs on the
+    # compute node and resolves this against the user's home.
+    remote_ssh_server_sh = (_quote_remote_path(remote_ssh_server)
                             if remote_ssh_server else "''")
 
     # pylint: disable=line-too-long
@@ -615,7 +617,9 @@ def _enroll_public_key(client: 'lsf.LsfClient', public_key: str) -> None:
 
 def _remote_file_size(client: 'lsf.LsfClient', path: str) -> Optional[int]:
     """Size of a file on the login node, or None if it does not exist."""
-    rc, stdout, _ = client.run_raw(f'stat -c %s {shlex.quote(path)}')
+    # _quote_remote_path, not shlex.quote: a literal ~ makes stat miss the
+    # file, which reads as "not staged" and re-uploads it on every launch.
+    rc, stdout, _ = client.run_raw(f'stat -c %s {_quote_remote_path(path)}')
     if rc != 0:
         return None
     try:
@@ -694,7 +698,7 @@ def _stage_remote_ssh_server(client: 'lsf.LsfClient', local_path: str,
                 'Failed to create the remote_ssh_server directory.',
                 stderr=f'{stdout}\n{stderr}')
         client.runner.rsync(local_file, remote_file, up=True, stream_logs=False)
-        cmd = f'chmod +x {shlex.quote(remote_file)}'
+        cmd = f'chmod +x {_quote_remote_path(remote_file)}'
         rc, stdout, stderr = client.run_raw(cmd)
         subprocess_utils.handle_returncode(
             rc,
