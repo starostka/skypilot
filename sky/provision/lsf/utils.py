@@ -557,14 +557,22 @@ def build_login_proxy_command(ssh_config_dict: Dict[str, Any]) -> str:
         'ssh',
         '-o', 'StrictHostKeyChecking=no',
         '-o', 'UserKnownHostsFile=/dev/null',
-        '-o', 'IdentitiesOnly=yes',
         '-o', 'ExitOnForwardFailure=yes',
         '-o', 'ServerAliveInterval=30',
+        # This runs during provisioning and inside background daemons, none
+        # of which have a tty: without BatchMode a missing credential turns
+        # into a password prompt that blocks forever instead of failing.
+        '-o', 'BatchMode=yes',
         '-p', str(ssh_config_dict['port']),
     ]  # yapf: disable
     private_key = ssh_config_dict.get('private_key')
     if private_key is not None:
-        parts += ['-i', private_key]
+        # IdentitiesOnly only makes sense alongside an explicit key. Setting
+        # it without one tells ssh to ignore the agent as well, leaving no
+        # identity to offer at all -- which is the common case on HPC, where
+        # the login node is reached with an agent-held key and ~/.lsf/config
+        # carries no IdentityFile.
+        parts += ['-o', 'IdentitiesOnly=yes', '-i', private_key]
     proxy_command = ssh_config_dict.get('proxycommand')
     if proxy_command is not None:
         parts += ['-o', f'ProxyCommand={proxy_command}']

@@ -309,14 +309,26 @@ def _build_bsub_script(
     log_path = _bsub_log_path(base_dir, '%J')
 
     # Memory: `rusage[mem=...]` is effectively mandatory (site esub scripts
-    # warn and inject a default otherwise). LSF sites commonly interpret
-    # rusage[mem] per slot/core (DTU does), so distribute the total request
-    # over the requested slots. The explicit MB unit avoids ambiguity from
-    # per-site LSF_UNIT_FOR_LIMITS settings.
+    # warn and inject a default otherwise). The explicit MB unit avoids
+    # ambiguity from per-site LSF_UNIT_FOR_LIMITS settings.
+    #
+    # Pass the FULL request per slot rather than dividing it across them.
+    # Sites commonly read rusage[mem] per slot for the reservation (DTU
+    # does: `-n 2 -R rusage[mem=2048MB]` reserves 4096MB), which makes
+    # dividing look right -- but the MEMLIMIT that actually kills the job
+    # tracks the per-slot number, not the total. Dividing therefore caps a
+    # request at 1/cpus of its size: a 2GB ask on 2 cpus was killed by
+    # TERM_MEMLIMIT at a 1GB limit while the SkyPilot runtime and Ray sat
+    # at 2GB. Nor can the limit be raised on its own -- DTU's esub rejects
+    # `-M` more than 1GB above the usage figure.
+    #
+    # The cost is over-reserving by a factor of `cpus` on per-slot sites.
+    # That is deliberate: over-reserving wastes scheduling, whereas
+    # under-limiting kills a job that stayed inside what it asked for.
     mem_directive = ''
     if memory_gb > 0:
-        mem_mb_per_core = max(1, -(-int(memory_gb * 1024) // cpus))
-        mem_directive = f'#BSUB -R "rusage[mem={mem_mb_per_core}MB]"\n'
+        mem_mb = max(1, int(memory_gb * 1024))
+        mem_directive = f'#BSUB -R "rusage[mem={mem_mb}MB]"\n'
 
     gpu_directive = ''
     if accelerator_count > 0:
