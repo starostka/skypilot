@@ -387,7 +387,15 @@ def _optimize_file_mounts(tmp_yaml_path: str) -> None:
             # the dst.
             mkdir_parent = f'mkdir -p {dst}'
             src_basename = f'{src_basename}/*'
-        mv = (f'cp -rf {_REMOTE_RUNTIME_FILES_DIR}/{src_basename} '
+        # `command cp`, not bare cp. A site profile that defines cp as a
+        # FUNCTION wrapping `cp -i` forces the interactive prompt regardless of
+        # the -f here, and with no tty the copy fails:
+        #     cp: overwrite '~/.sky/sky_ray.yml'?
+        #     RuntimeError: Failed to run setup commands (exit code 1)
+        # `command` bypasses functions, and putting it first also stops an
+        # alias on `cp` being expanded. Observed on DTU's LSF login nodes,
+        # whose JOB_STARTER runs `bash -l -c` and so reads the site profile.
+        mv = (f'command cp -rf {_REMOTE_RUNTIME_FILES_DIR}/{src_basename} '
               f'{dst_parent_dir}/{dst_basename}')
         fragment = f'({mkdir_parent} && {mv})'
         commands.append(fragment)
