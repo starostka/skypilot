@@ -120,3 +120,21 @@ def test_optimizer_can_evaluate_lsf_resources():
     # A property of the backend, not of a cluster: no connection is needed to
     # answer, which is why this is returned statically.
     assert lsf_cloud.clouds.CloudImplementationFeatures.STOP in unsupported
+
+
+def test_remote_paths_keep_a_leading_tilde_expandable():
+    """`mkdir -p '~/x'` creates a directory literally named "~".
+
+    shlex.quote puts the whole path in single quotes, where the shell does NOT
+    expand a tilde. rsync's tilde IS expanded by the remote shell, so the two
+    disagree and the upload fails with "No such file or directory" against the
+    real home path — while a stray "~" directory accumulates in the user's home.
+    """
+    from sky.provision.lsf.instance import _quote_remote_path
+
+    assert _quote_remote_path('~/.sky/lsf/bin') == '"$HOME"/.sky/lsf/bin'
+    assert _quote_remote_path('~') == '"$HOME"'
+    # Absolute and relative paths are quoted normally.
+    assert _quote_remote_path('/opt/x y') == "'/opt/x y'"
+    # A path merely CONTAINING a tilde is not a home reference.
+    assert _quote_remote_path('/opt/~weird') == "'/opt/~weird'"

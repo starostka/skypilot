@@ -624,6 +624,27 @@ def _remote_file_size(client: 'lsf.LsfClient', path: str) -> Optional[int]:
         return None
 
 
+def _quote_remote_path(path: str) -> str:
+    """Quote a remote path for the shell, keeping a leading ~ expandable.
+
+    shlex.quote('~/x') yields "'~/x'", and a tilde inside single quotes is
+    LITERAL — so `mkdir -p '~/.sky/lsf/bin'` creates a directory actually named
+    "~" in the home directory. rsync's own tilde is expanded by the remote
+    shell, so the two disagree and the upload fails with:
+
+        rsync: change_dir "/zhome/../.sky/lsf/bin" failed: No such file
+               or directory
+
+    Emitting "$HOME"/rest keeps the expansion while still quoting the parts
+    that need it.
+    """
+    if path == '~':
+        return '"$HOME"'
+    if path.startswith('~/'):
+        return '"$HOME"/' + shlex.quote(path[2:])
+    return shlex.quote(path)
+
+
 def _stage_remote_ssh_server(client: 'lsf.LsfClient', local_path: str,
                              remote_path: str) -> None:
     """Stage the dropbear fallback binaries onto the cluster.
@@ -665,7 +686,7 @@ def _stage_remote_ssh_server(client: 'lsf.LsfClient', local_path: str,
                          f'({local_size} bytes); skipping.')
             continue
         if remote_dir:
-            cmd = f'mkdir -p {shlex.quote(remote_dir)}'
+            cmd = f'mkdir -p {_quote_remote_path(remote_dir)}'
             rc, stdout, stderr = client.run_raw(cmd)
             subprocess_utils.handle_returncode(
                 rc,
@@ -866,7 +887,7 @@ def _create_virtual_instance(
                                                         cluster_name_on_cloud)
     provision_scripts_dir = os.path.dirname(provision_script_path)
 
-    cmd = f'mkdir -p {shlex.quote(provision_scripts_dir)}'
+    cmd = f'mkdir -p {_quote_remote_path(provision_scripts_dir)}'
     rc, stdout, stderr = client.run_raw(cmd)
     subprocess_utils.handle_returncode(
         rc,
