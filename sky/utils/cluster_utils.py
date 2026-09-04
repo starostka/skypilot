@@ -515,12 +515,24 @@ class SSHConfigHelper:
                 break
         if not found:
             # Did not find Include string. Insert `Include` lines.
-            with open(config_path, 'w', encoding='utf-8') as f:
-                config.insert(
-                    0, '# Added by SkyPilot for ssh config of all clusters\n'
-                    f'{include_str}\n')
-                f.write(''.join(config).strip())
-                f.write('\n' * 2)
+            try:
+                with open(config_path, 'w', encoding='utf-8') as f:
+                    config.insert(
+                        0,
+                        '# Added by SkyPilot for ssh config of all clusters\n'
+                        f'{include_str}\n')
+                    f.write(''.join(config).strip())
+                    f.write('\n' * 2)
+            except OSError as e:
+                # ~/.ssh/config can be read-only (home-manager symlinks it into
+                # the nix store; MDM-managed machines do the same). The cluster
+                # entry itself lives under ~/.sky, so the only thing lost is the
+                # `ssh <cluster>` shortcut -- not worth failing a launch that
+                # has already succeeded.
+                logger.warning(
+                    f'Could not add {include_str!r} to {config_path}: {e}. '
+                    'The cluster is usable; to get `ssh <cluster>` working, '
+                    'add that Include line to your SSH config yourself.')
 
         proxy_command = auth_config.get('ssh_proxy_command', None)
 

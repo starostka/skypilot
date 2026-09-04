@@ -80,7 +80,15 @@ setup_commands:
     {%- for initial_setup_command in initial_setup_commands %}
     {{ initial_setup_command }}
     {%- endfor %}
-    mkdir -p ~/.ssh; touch ~/.ssh/config;
+    mkdir -p ~/.ssh;
+    # A dotfile manager may leave ~/.ssh/config a symlink whose target does
+    # not exist on this filesystem. touch/append then fail with ENOENT, so
+    # materialise the target rather than clobber the user's link.
+    if [ -L ~/.ssh/config ] && [ ! -e ~/.ssh/config ]; then
+      _sky_t=$(readlink -m ~/.ssh/config);
+      mkdir -p "$(dirname "$_sky_t")" && touch "$_sky_t" || rm -f ~/.ssh/config;
+    fi;
+    touch ~/.ssh/config;
     {{ conda_installation_commands }}
     {{ uv_installation_commands }}
     {{ ray_skypilot_installation_commands }}
