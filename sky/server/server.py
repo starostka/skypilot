@@ -665,7 +665,12 @@ class AuthProxyMiddleware(starlette.middleware.base.BaseHTTPMiddleware):
         # Every header NAME, unfiltered: a filtered list cannot distinguish
         # "absent" from "present under a name the filter does not match", and
         # that ambiguity has cost several rounds. Names only, never values.
-        if auth_user is None:
+        # Unauthenticated liveness probes are expected to carry no identity:
+        # warning on them fires every few seconds and buries the one warning
+        # that means something (a real request that lost its identity on the
+        # way in), which has already cost real debugging time.
+        _is_probe = request.url.path.startswith('/api/health')
+        if auth_user is None and not _is_probe:
             logger.warning(
                 'No identity header %r; request env hook will be SKIPPED. '
                 'Headers received: %s', self.config.header_name,
@@ -722,7 +727,7 @@ class AuthProxyMiddleware(starlette.middleware.base.BaseHTTPMiddleware):
                     if _tok:
                         request.state.auth_access_token = _tok
 
-            if request.state.auth_access_token is None:
+            if request.state.auth_access_token is None and not _is_probe:
                 # SAY SO, ONCE, WITH THE EVIDENCE. A request can be fully
                 # authenticated while carrying no token the server can forward,
                 # and the only symptom is a backend failing much later with "no
