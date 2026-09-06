@@ -3953,8 +3953,15 @@ def _serve_html_with_nonce(
     return fastapi.responses.HTMLResponse(content=content)
 
 
+# Both spellings, deliberately. Without the bare '/dashboard' route Starlette
+# answers it with its own 307 to '/dashboard/', which is fine directly and a
+# trap behind a proxy: a gateway that normalises the trailing slash away sends
+# '/dashboard' again, gets the same 307 back, and the browser gives up with
+# ERR_TOO_MANY_REDIRECTS on a page that redirects to itself. Serving the index
+# at both paths removes the redirect, and with it the only thing that can loop.
+@app.get('/dashboard')
 @app.get('/dashboard/{full_path:path}')
-async def serve_dashboard(request: fastapi.Request, full_path: str):
+async def serve_dashboard(request: fastapi.Request, full_path: str = ''):
     """Serves the Next.js dashboard application.
 
     Args:
