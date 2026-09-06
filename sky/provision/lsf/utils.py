@@ -517,6 +517,23 @@ def _is_segment_subsequence(segments_a: List[str],
     return True
 
 
+def _is_run_together_prefix(can_norm: str, raw_norm: str) -> bool:
+    """Whether a canonical name opens a run-together model name.
+
+    Some sites report models with no separators at all ('NVIDIAH100PCIE'),
+    which leaves the segment matcher above with a single segment and nothing
+    to line up against. Matching the concatenated canonical name as a prefix
+    handles those, and the trailing-digit guard keeps the same promise the
+    segment matcher makes: 'A10' must not claim 'NVIDIAA10080GBPCIE', which
+    is an A100-80GB.
+    """
+    can_flat = can_norm.replace('-', '')
+    raw_flat = raw_norm.replace('-', '')
+    if not raw_flat.startswith(can_flat):
+        return False
+    return not raw_flat[len(can_flat):][:1].isdigit()
+
+
 def canonicalize_lsf_gpu_model(raw_name: str) -> str:
     """Convert an LSF `bhosts -gpu` MODEL string to a canonical GPU name.
 
@@ -524,10 +541,16 @@ def canonicalize_lsf_gpu_model(raw_name: str) -> str:
     first canonical name whose normalized form matches the raw string.
     Falls back to uppercasing.
 
+    The name matters beyond display: `lsf_catalog` groups hosts by it, so a
+    model that fails to canonicalize is advertised under its raw LSF string
+    and `--gpus H100` then matches nothing on the cluster.
+
     Examples:
         'TeslaV100_PCIE_32GB' -> 'V100-32GB'
         'NVIDIAA100_PCIE_40GB' -> 'A100'
         'NVIDIAL40S'           -> 'L40S'
+        'NVIDIAH100PCIE'       -> 'H100'
+        'NVIDIAA10080GBPCIE'   -> 'A100-80GB'
     """
     raw_norm = _normalize_gpu_name(raw_name)
     raw_segments = raw_norm.split('-')
@@ -540,6 +563,8 @@ def canonicalize_lsf_gpu_model(raw_name: str) -> str:
         if len(can_segments) < len(raw_segments):
             if _is_segment_subsequence(can_segments, raw_segments):
                 return canonical
+        elif _is_run_together_prefix(can_norm, raw_norm):
+            return canonical
 
     return raw_name.upper()
 

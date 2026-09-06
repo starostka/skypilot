@@ -65,10 +65,34 @@ class TestWalltime:
 class TestCanonicalizeGpuModel:
 
     def test_dtu_models(self):
-        # Real MODEL strings from `bhosts -gpu -w` on DTU LSF.
+        # Every MODEL string `bhosts -gpu -w` reports on DTU LSF.
+        for raw, expected in [
+            ('TeslaV100_PCIE_16GB', 'V100'),
+            ('TeslaV100_PCIE_32GB', 'V100-32GB'),
+            ('TeslaV100_SXM2_32GB', 'V100-32GB'),
+            ('NVIDIAA100_PCIE_40GB', 'A100'),
+            ('NVIDIAA10', 'A10'),
+            ('NVIDIAA40', 'A40'),
+            ('NVIDIAL40S', 'L40S'),
+        ]:
+            assert lsf_utils.canonicalize_lsf_gpu_model(raw) == expected
+
+    def test_models_written_without_separators(self):
+        # Some DTU hosts report the model as one run-together word. These used
+        # to fall through to the uppercase fallback, which matters beyond
+        # display: lsf_catalog groups hosts by this name, so the H100 lane
+        # advertised itself as 'NVIDIAH100PCIE' and `--gpus H100` matched
+        # nothing.
+        assert lsf_utils.canonicalize_lsf_gpu_model('NVIDIAH100PCIe') == 'H100'
         assert lsf_utils.canonicalize_lsf_gpu_model(
-            'TeslaV100_PCIE_32GB') == 'V100-32GB'
-        assert lsf_utils.canonicalize_lsf_gpu_model('NVIDIAL40S') == 'L40S'
+            'NVIDIAA10080GBPCIe') == 'A100-80GB'
+
+    def test_a10_does_not_claim_an_a100(self):
+        # The trailing-digit guard: without it 'A10' is a prefix of
+        # 'a10080gbpcie' and wins by list order.
+        assert lsf_utils.canonicalize_lsf_gpu_model(
+            'NVIDIAA10080GBPCIe') != 'A10'
+        assert lsf_utils.canonicalize_lsf_gpu_model('NVIDIAA100PCIe') == 'A100'
 
     def test_fallback_uppercases(self):
         assert lsf_utils.canonicalize_lsf_gpu_model(
