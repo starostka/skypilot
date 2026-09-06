@@ -32,15 +32,20 @@ class Lsf(clouds.Cloud):
 
     _REPR = 'LSF'
     _CLOUD_UNSUPPORTED_FEATURES = {
+        # AUTODOWN and AUTO_TERMINATE are supported: the skylet tears the
+        # cluster down from inside the allocation (see the LSB_JOBID branch in
+        # provision/lsf/instance.py::terminate_instances). STOP and AUTOSTOP
+        # are not, and cannot be: an LSF allocation is held or released, never
+        # paused — there is no state to resume from, and stop_instances()
+        # raises NotImplementedError accordingly.
         clouds.CloudImplementationFeatures.AUTOSTOP: 'LSF does not '
-                                                     'support autostop.',
-        clouds.CloudImplementationFeatures.AUTODOWN: 'LSF does not '
-                                                     'support autodown.',
-        clouds.CloudImplementationFeatures.AUTO_TERMINATE: 'LSF does not '
-                                                           'support auto-'
-                                                           'termination.',
+                                                     'support autostop; use '
+                                                     'autodown (`--down`) to '
+                                                     'release the allocation.',
         clouds.CloudImplementationFeatures.STOP: 'LSF does not support '
-                                                 'stopping instances.',
+                                                 'stopping instances: an '
+                                                 'allocation is released, not '
+                                                 'paused. Use `sky down`.',
         clouds.CloudImplementationFeatures.SPOT_INSTANCE: 'Spot instances are '
                                                           'not supported in '
                                                           'LSF.',

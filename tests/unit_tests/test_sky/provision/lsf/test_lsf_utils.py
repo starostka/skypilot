@@ -538,3 +538,74 @@ class TestStageRemoteSshServer:
             lsf_instance._stage_remote_ssh_server(client,
                                                   str(tmp_path / 'nope'),
                                                   '/remote/x')
+
+
+class TestSelfTermination:
+    """Autodown: the skylet tears the cluster down from inside the job.
+
+    The SSH path cannot run there — the caller's certificate lives on the API
+    server — so terminate_instances() must recognise the allocation it is
+    standing in and use `bkill` locally.
+    """
+
+    @staticmethod
+    def _completed(returncode: int = 0, stderr: str = ''):
+        return mock.Mock(returncode=returncode, stdout='', stderr=stderr)
+
+    def test_bkill_issued_inside_own_allocation(self, monkeypatch):
+        monkeypatch.setenv('LSB_JOBID', '4242')
+        monkeypatch.setenv('LSB_JOBNAME', 'sky-abcd-user')
+        monkeypatch.delenv('LSF_BINDIR', raising=False)
+        run = mock.Mock(return_value=self._completed())
+        monkeypatch.setattr(lsf_instance.subprocess, 'run', run)
+
+        # pylint: disable=protected-access
+        assert lsf_instance._terminate_from_inside_allocation(
+            'sky-abcd-user') is True
+        assert run.call_args[0][0] == ['bkill', '4242']
+
+    def test_falls_back_to_lsf_bindir(self, monkeypatch):
+        monkeypatch.setenv('LSB_JOBID', '7')
+        monkeypatch.delenv('LSB_JOBNAME', raising=False)
+        monkeypatch.setenv('LSF_BINDIR', '/opt/lsf/bin')
+        run = mock.Mock(side_effect=[
+            OSError('bkill: not found'),
+            self._completed(),
+        ])
+        monkeypatch.setattr(lsf_instance.subprocess, 'run', run)
+
+        # pylint: disable=protected-access
+        assert lsf_instance._terminate_from_inside_allocation('sky-x') is True
+        assert run.call_args[0][0] == ['/opt/lsf/bin/bkill', '7']
+
+    def test_raises_when_no_bkill_works(self, monkeypatch):
+        monkeypatch.setenv('LSB_JOBID', '7')
+        monkeypatch.delenv('LSB_JOBNAME', raising=False)
+        monkeypatch.delenv('LSF_BINDIR', raising=False)
+        monkeypatch.setattr(
+            lsf_instance.subprocess, 'run',
+            mock.Mock(return_value=self._completed(1, 'Job not found')))
+
+        with pytest.raises(RuntimeError, match='leaked'):
+            # pylint: disable=protected-access
+            lsf_instance._terminate_from_inside_allocation('sky-x')
+
+    def test_declines_another_jobs_allocation(self, monkeypatch):
+        monkeypatch.setenv('LSB_JOBID', '9')
+        monkeypatch.setenv('LSB_JOBNAME', 'someone-elses-job')
+        run = mock.Mock()
+        monkeypatch.setattr(lsf_instance.subprocess, 'run', run)
+
+        # pylint: disable=protected-access
+        assert lsf_instance._terminate_from_inside_allocation(
+            'sky-abcd-user') is False
+        run.assert_not_called()
+
+    def test_api_server_takes_the_ssh_path(self, monkeypatch):
+        monkeypatch.delenv('LSB_JOBID', raising=False)
+        run = mock.Mock()
+        monkeypatch.setattr(lsf_instance.subprocess, 'run', run)
+
+        # pylint: disable=protected-access
+        assert lsf_instance._terminate_from_inside_allocation('sky-x') is False
+        run.assert_not_called()

@@ -199,6 +199,25 @@ def _compute_set_autostop_args_for_hooks_only_relaunch(
     )
 
 
+def _default_autostop_config() -> Optional['resources_lib.AutostopConfig']:
+    """The deployment-wide `autostop` default from the SkyPilot config.
+
+    A top-level `autostop:` in ~/.sky/config.yaml applies to every cluster
+    launched without one of its own — the counterpart of `default_walltime` on
+    a batch scheduler, and the only way for an operator to bound idle clusters
+    without writing an admin policy. Takes the same shapes as the task-level
+    `resources.autostop`.
+
+    Returns None when unset, which leaves the launch with no autostop at all.
+    """
+    # pylint: disable=import-outside-toplevel
+    from sky import resources as resources_lib
+    config = skypilot_config.get_nested(('autostop',), None)
+    if config is None:
+        return None
+    return resources_lib.AutostopConfig.from_yaml_config(config)
+
+
 def _execute(
     entrypoint: Union['sky.Task', 'sky.Dag'],
     dryrun: bool = False,
@@ -430,6 +449,11 @@ def _execute_dag(
                 raise ValueError(
                     'All resources must have the same autostop config.')
         resource_autostop_config = resources[0].autostop_config
+        if resource_autostop_config is None:
+            # Neither the task nor the command line asked for anything: fall
+            # back to the deployment default. An explicit `autostop: false` is
+            # a config, not None, so it still wins.
+            resource_autostop_config = _default_autostop_config()
 
         idle_minutes_to_autostop: Optional[int] = None
         down = False

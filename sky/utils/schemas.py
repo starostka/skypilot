@@ -2948,6 +2948,10 @@ def get_config_schema():
                 extra_properties=_extra_jobs_properties,),
             'serve': _get_controller_schema(),
             'allowed_clouds': allowed_clouds,
+            # Deployment-wide default, applied to any cluster launched without
+            # an autostop of its own (`resources.autostop`, `sky launch -i`).
+            # Same shapes as the task-level field.
+            'autostop': _AUTOSTOP_SCHEMA,
             'admin_policy': admin_policy_schema,
             'docker': docker_configs,
             'nvidia_gpus': gpu_configs,

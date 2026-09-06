@@ -28,6 +28,7 @@ machinery works unchanged.
 import json
 import os
 import shlex
+import subprocess
 import tempfile
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -60,6 +61,10 @@ _JOB_TERMINATION_TIMEOUT_SECONDS = 60
 # How long to give the job's TERM trap to run cleanup before escalating to
 # `bkill -r` (force removal).
 _TERMINATION_GRACE_PERIOD_SECONDS = 30
+# Bound on a local `bkill` issued from inside the allocation; the command
+# talks to the local LSF daemons, so it either answers quickly or is
+# unusable.
+_LOCAL_BKILL_TIMEOUT_SECONDS = 30
 
 # bsub options that SkyPilot controls and must not be overridden by users.
 _BSUB_PROTECTED_OPTIONS = frozenset({
@@ -1106,6 +1111,72 @@ def _wait_for_jobs_gone(client: 'lsf.LsfClient', job_name: str,
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
+def _terminate_from_inside_allocation(cluster_name_on_cloud: str) -> bool:
+    """Release this cluster's own LSF allocation from a process inside it.
+
+    Autodown runs on the compute node: the skylet's StopEvent calls
+    terminate_instances() there rather than on the API server. The SSH path
+    below cannot work from there — provider_config['ssh']['private_key'] names
+    a file on the API server, where the caller's certificate is minted per
+    request and kept on tmpfs. Inside the allocation none of that is needed:
+    LSF gives the job its own id, and a job may always kill itself.
+
+    bkill's SIGTERM reaches the job script's `trap 'exit 0' TERM`, so the
+    normal cleanup (skylet, sshd, tunnel, directories) still runs.
+
+    Returns False when this process is not inside the cluster's allocation,
+    leaving the caller on the SSH path.
+    """
+    job_id = os.environ.get('LSB_JOBID')
+    if not job_id:
+        return False
+
+    # LSF names the batch job after the cluster (`#BSUB -J`), so a mismatch
+    # means we are inside some *other* allocation and must not kill it.
+    job_name = os.environ.get('LSB_JOBNAME')
+    if job_name is not None and job_name != cluster_name_on_cloud:
+        logger.warning(
+            f'Running inside LSF job {job_id} ({job_name!r}), which is not '
+            f'cluster {cluster_name_on_cloud!r}. Not self-terminating.')
+        return False
+
+    # LSF exports LSF_BINDIR into every job's environment; PATH is the normal
+    # case and the absolute path is the fallback for a job whose profile was
+    # not sourced.
+    candidates = ['bkill']
+    bindir = os.environ.get('LSF_BINDIR')
+    if bindir:
+        candidates.append(os.path.join(bindir, 'bkill'))
+
+    errors = []
+    for bkill in candidates:
+        try:
+            proc = subprocess.run([bkill, job_id],
+                                  capture_output=True,
+                                  text=True,
+                                  timeout=_LOCAL_BKILL_TIMEOUT_SECONDS,
+                                  check=False)
+        except (OSError, subprocess.SubprocessError) as e:
+            errors.append(f'{bkill}: {e}')
+            continue
+        if proc.returncode == 0:
+            logger.info(f'Released LSF job {job_id} for cluster '
+                        f'{cluster_name_on_cloud} from inside the allocation.')
+            return True
+        errors.append(f'{bkill}: exit {proc.returncode}: '
+                      f'{proc.stderr.strip() or proc.stdout.strip()}')
+
+    # Nothing else on the compute node can end the allocation: the job script's
+    # pid is not recorded there, and the API server's credentials are not
+    # present. Fail loudly rather than let the caller fall through to an SSH
+    # attempt that can only produce a misleading error.
+    raise RuntimeError(
+        f'Failed to release LSF job {job_id} for cluster '
+        f'{cluster_name_on_cloud} from inside the allocation: '
+        f'{"; ".join(errors)}. The allocation will be leaked until its '
+        'walltime expires; release it with `bkill` on the login node.')
+
+
 def terminate_instances(
     cluster_name_on_cloud: str,
     provider_config: Optional[Dict[str, Any]] = None,
@@ -1117,6 +1188,11 @@ def terminate_instances(
     if worker_only:
         logger.warning(
             'worker_only=True is not supported for LSF, this is a no-op.')
+        return
+
+    # Autodown: we are the cluster, and we kill ourselves. Never reached on
+    # the API server, which has no LSB_JOBID.
+    if _terminate_from_inside_allocation(cluster_name_on_cloud):
         return
 
     client = lsf_utils.make_client_from_ssh_config(
