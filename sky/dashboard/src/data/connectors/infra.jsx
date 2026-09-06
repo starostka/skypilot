@@ -1306,3 +1306,180 @@ async function getSlurmServiceGPUs() {
     };
   }
 }
+
+// ---------------------------------------------------------------------------
+// LSF
+//
+// Shaped like the Slurm block above, with one difference that comes from LSF
+// itself: a host does not report the queues it belongs to (`bhosts` has no
+// queue column), so queues are fetched separately from the server, which reads
+// them from the SkyPilot config. Everything else — cluster names without a
+// login-node round trip, cluster-level GPU availability, per-node GPUs — is
+// the same shape.
+// ---------------------------------------------------------------------------
+
+// One request/poll round trip against an endpoint that returns a request ID.
+// The four LSF fetchers differ only in path, body and log label, so the shared
+// `catch -> []` posture lives here: one dead endpoint must not blank the whole
+// section.
+async function fetchLsfEndpoint(path, body, label) {
+  try {
+    const response = await apiClient.post(path, body);
+    if (!response.ok) {
+      throw new Error(`Failed to get ${label} with status ${response.status}`);
+    }
+    const id = response.headers.get('X-Skypilot-Request-ID');
+    if (!id) {
+      throw new Error(`No request ID received from server for ${label}`);
+    }
+    const fetchedData = await apiClient.get(`/api/get?request_id=${id}`);
+    if (!fetchedData.ok) {
+      // A 500 here is the server reporting that the cluster could not be
+      // queried, which is normal for an unreachable login node.
+      console.error(
+        `Failed to get ${label} result with status ${fetchedData.status}`
+      );
+      return [];
+    }
+    const data = await fetchedData.json();
+    return data.return_value ? JSON.parse(data.return_value) : [];
+  } catch (error) {
+    console.error(`Error fetching ${label}:`, error);
+    return [];
+  }
+}
+
+async function getLsfClusterGPUs() {
+  return fetchLsfEndpoint('/lsf_gpu_availability', {}, 'LSF cluster GPUs');
+}
+
+async function getLsfPerNodeGPUs() {
+  return fetchLsfEndpoint('/lsf_node_info', {}, 'LSF node info');
+}
+
+// The clusters in ~/.lsf/config, answered without contacting any login node —
+// so a cluster that is currently unreachable is still listed.
+async function getLsfClusterNames() {
+  return fetchLsfEndpoint('/lsf_cluster_names', {}, 'LSF cluster names');
+}
+
+// Queues, with live `bqueues` state where the login node answers. The
+// configured shape comes back either way.
+async function getLsfQueueInfo() {
+  return fetchLsfEndpoint('/lsf_queue_info', {}, 'LSF queue info');
+}
+
+// Export LSF infrastructure fetching for parallel loading
+export async function getLsfInfrastructure() {
+  return await getLsfServiceGPUs();
+}
+
+async function getLsfServiceGPUs() {
+  try {
+    const [clusterNames, clusterGPUsRaw, nodeGPUsRaw, queuesRaw] =
+      await Promise.all([
+        getLsfClusterNames(),
+        getLsfClusterGPUs(),
+        getLsfPerNodeGPUs(),
+        getLsfQueueInfo(),
+      ]);
+
+    const allLsfGPUs = {};
+    const perClusterLsfGPUs = {};
+    const perNodeLsfGPUs = {};
+
+    // clusterGPUsRaw: [ [cluster, [ [gpu_name, counts, capacity, available] ] ] ]
+    for (const clusterData of clusterGPUsRaw) {
+      const clusterName = clusterData[0];
+      for (const gpuRaw of clusterData[1]) {
+        const gpuName = gpuRaw[0];
+        const gpuRequestableQtyPerNode = gpuRaw[1].join(', ');
+        const gpuTotal = gpuRaw[2];
+        const gpuFree = gpuRaw[3];
+
+        if (gpuName in allLsfGPUs) {
+          allLsfGPUs[gpuName].gpu_total += gpuTotal;
+          allLsfGPUs[gpuName].gpu_free += gpuFree;
+        } else {
+          allLsfGPUs[gpuName] = {
+            gpu_total: gpuTotal,
+            gpu_free: gpuFree,
+            gpu_name: gpuName,
+          };
+        }
+
+        perClusterLsfGPUs[`${clusterName}#${gpuName}`] = {
+          gpu_name: gpuName,
+          gpu_requestable_qty_per_node: gpuRequestableQtyPerNode,
+          gpu_total: gpuTotal,
+          gpu_free: gpuFree,
+          cluster: clusterName,
+        };
+      }
+    }
+
+    for (const node of nodeGPUsRaw) {
+      const clusterName = node.lsf_cluster_name || 'default';
+      const key = `${clusterName}/${node.node_name}/${node.gpu_type || '-'}`;
+      perNodeLsfGPUs[key] = {
+        node_name: node.node_name,
+        gpu_name: node.gpu_type || '-',
+        gpu_total: node.total_gpus || 0,
+        gpu_free: node.free_gpus || 0,
+        cluster: clusterName,
+        // Empty until LSF host->queue membership is resolvable; the queue
+        // rows come from the queue endpoint instead.
+        queue: node.queue || '',
+        node_state: node.node_state,
+      };
+    }
+
+    // Queue rows, grouped by cluster and already in the shape the section's
+    // sub-group rows expect: one entry per queue, each split by GPU type.
+    const queuesByCluster = {};
+    for (const queue of queuesRaw) {
+      const clusterName = queue.lsf_cluster_name || 'default';
+      if (!(clusterName in queuesByCluster)) {
+        queuesByCluster[clusterName] = [];
+      }
+      const gpuCount = queue.gpu_count_per_host || 0;
+      queuesByCluster[clusterName].push({
+        name: queue.queue,
+        isDefault: Boolean(queue.is_default),
+        gpu_type: queue.gpu_type || null,
+        gpu_count_per_host: gpuCount,
+        status: queue.status || null,
+        pend: queue.pend ?? null,
+        run: queue.run ?? null,
+      });
+    }
+
+    return {
+      lsfClusterNames: clusterNames,
+      allLsfGPUs: Object.values(allLsfGPUs).sort((a, b) =>
+        a.gpu_name.localeCompare(b.gpu_name)
+      ),
+      perClusterLsfGPUs: Object.values(perClusterLsfGPUs).sort(
+        (a, b) =>
+          a.cluster.localeCompare(b.cluster) ||
+          a.gpu_name.localeCompare(b.gpu_name)
+      ),
+      perNodeLsfGPUs: Object.values(perNodeLsfGPUs).sort(
+        (a, b) =>
+          (a.cluster || '').localeCompare(b.cluster || '') ||
+          (a.node_name || '').localeCompare(b.node_name || '') ||
+          (a.gpu_name || '').localeCompare(b.gpu_name || '')
+      ),
+      lsfQueues: queuesByCluster,
+    };
+  } catch (error) {
+    console.error('Error fetching LSF GPUs:', error);
+    return {
+      lsfClusterNames: [],
+      allLsfGPUs: [],
+      perClusterLsfGPUs: [],
+      perNodeLsfGPUs: [],
+      lsfQueues: {},
+    };
+  }
+}

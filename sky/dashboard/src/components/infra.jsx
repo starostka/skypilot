@@ -37,6 +37,7 @@ import {
   getContextJobs,
   getContextClusters,
   getSlurmInfrastructure,
+  getLsfInfrastructure,
 } from '@/data/connectors/infra';
 import { CLOUDS_LIST } from '@/data/connectors/constants';
 import {
@@ -264,7 +265,7 @@ const formatSlurmPartitions = (partitionField) => {
 // to the node's GPU count, plus the count itself when it is not a power of two.
 // Partition rows compute this client-side because the catalog aggregates per
 // cluster, and a partition may hold only some of the cluster's node shapes.
-export const slurmRequestableCounts = (gpusPerNode) => {
+export const requestableGpuCounts = (gpusPerNode) => {
   const counts = [];
   for (let count = 1; count <= gpusPerNode; count *= 2) {
     counts.push(count);
@@ -281,6 +282,32 @@ export const slurmRequestableCounts = (gpusPerNode) => {
 // A node can belong to several partitions, so its capacity is counted once per
 // partition it is reachable from: partition rows overlap and do not sum to the
 // cluster totals.
+// Kept under its original name: the Slurm section and its tests import it.
+export const slurmRequestableCounts = requestableGpuCounts;
+
+// Turn `/lsf_queue_info` rows into the same sub-group shape the section
+// renders for Slurm partitions. The difference is what is knowable: LSF
+// declares a queue's GPU model and per-host count in config, but nothing
+// portable says which hosts serve a queue, so a queue's totals are left null
+// and render as dashes rather than as a confident zero.
+export const aggregateLsfQueues = (queues) =>
+  (queues || []).map((queue) => ({
+    name: queue.name,
+    isDefault: Boolean(queue.isDefault),
+    types: queue.gpu_type
+      ? [
+          {
+            gpu_name: queue.gpu_type,
+            gpu_total: null,
+            gpu_free: null,
+            requestableQtys: requestableGpuCounts(
+              queue.gpu_count_per_host || 0
+            ),
+          },
+        ]
+      : [null],
+  }));
+
 const aggregateSlurmPartitions = (nodes) => {
   const byPartition = new Map();
   nodes.forEach((node) => {
@@ -300,7 +327,7 @@ const aggregateSlurmPartitions = (nodes) => {
       };
       type.gpu_total += node.gpu_total || 0;
       type.gpu_free += node.gpu_free || 0;
-      slurmRequestableCounts(node.gpu_total || 0).forEach((count) =>
+      requestableGpuCounts(node.gpu_total || 0).forEach((count) =>
         type.requestableQtys.add(count)
       );
       partition.byType.set(gpuName, type);
@@ -344,7 +371,15 @@ export function InfrastructureSection({
   isJobsDataLoading = true,
   isClusterDataLoading = true, // Loading state for cluster data
   isSSH = false, // To differentiate between SSH and Kubernetes
-  isSlurm = false, // To differentiate Slurm clusters
+  isSlurm = false, // Back-compat alias for scheduler="slurm"
+  // Batch schedulers (Slurm, LSF) render as clusters with sub-group rows
+  // rather than as Kubernetes-style contexts: null | 'slurm' | 'lsf'.
+  scheduler = null,
+  // context -> sub-group rows, for a scheduler that cannot derive them from
+  // its nodes. Slurm rolls partitions up out of `sinfo -N`; LSF has no queue
+  // column on its hosts, so its queues are supplied here from the config.
+  subGroups = {},
+  subGroupLabel = 'Partition',
   actionButton = null, // Optional action button for the header
   contextWorkspaceMap = {}, // Mapping of contexts to workspaces
   contextErrors = {}, // Mapping of contexts to error messages
@@ -357,12 +392,16 @@ export function InfrastructureSection({
   // recompute on every render when `contexts` is nullish)
   const safeContexts = React.useMemo(() => contexts || [], [contexts]);
 
+  const schedulerKind = scheduler ?? (isSlurm ? 'slurm' : null);
+  const isScheduler = schedulerKind !== null;
+  const subGroupLabelLower = subGroupLabel.toLowerCase();
+
   const contextDisplayName = useCallback(
     (context) => (isSSH ? context.replace(/^ssh-/, '') : context),
     [isSSH]
   );
 
-  const contextNoun = isSSH ? 'pool' : isSlurm ? 'cluster' : 'context';
+  const contextNoun = isSSH ? 'pool' : isScheduler ? 'cluster' : 'context';
 
   // Slurm clusters with more than one partition start collapsed on their
   // cluster-wide totals; expanding swaps in the per-partition rows.
@@ -419,7 +458,9 @@ export function InfrastructureSection({
     // node can be in several partitions, so these rows overlap — which is why
     // they are behind a toggle rather than shown by default. The partition cell
     // spans its own type rows.
-    const partitions = isSlurm ? aggregateSlurmPartitions(nodes) : [];
+    const partitions =
+      subGroups[context] ??
+      (schedulerKind === 'slurm' ? aggregateSlurmPartitions(nodes) : []);
     const partitionRows = partitions.flatMap((partition) =>
       partition.types.map((type, index) => ({
         key: `partition/${partition.name}/${type ? type.gpu_name : 'none'}`,
@@ -429,12 +470,15 @@ export function InfrastructureSection({
       }))
     );
 
-    const contextStatsKey = buildContextStatsKey(context, { isSSH, isSlurm });
+    const contextStatsKey = buildContextStatsKey(context, {
+      isSSH,
+      scheduler: schedulerKind,
+    });
     const stats = contextStats[contextStatsKey] || { clusters: 0, jobs: 0 };
 
     // Kubernetes uses progressive per-context loading; Slurm/SSH load all at once.
     const hasGpuData =
-      isSlurm || isSSH ? !isLoading : loadedContexts.has(context);
+      isScheduler || isSSH ? !isLoading : loadedContexts.has(context);
     const hasNodeData = hasGpuData;
 
     const aggregatedCpu = calculateAggregatedResource(nodes, 'cpu_count', true);
@@ -446,7 +490,7 @@ export function InfrastructureSection({
 
     const displayName = contextDisplayName(context);
     const rowId = displayName;
-    const rowKind = isSSH ? 'ssh' : isSlurm ? 'slurm' : 'k8s';
+    const rowKind = isSSH ? 'ssh' : (schedulerKind ?? 'k8s');
     // Workspace annotation is shown only when the context is in more than
     // one workspace (a single "default" everywhere is noise).
     const allWorkspaces = contextWorkspaceMap[context] || [];
@@ -516,7 +560,7 @@ export function InfrastructureSection({
   const isTableRefreshing =
     !isInitialLoad &&
     (isLoading ||
-      (!(isSlurm || isSSH) &&
+      (!(isScheduler || isSSH) &&
         safeContexts.length > 0 &&
         !safeContexts.every((c) => loadedContexts.has(c))));
 
@@ -567,17 +611,17 @@ export function InfrastructureSection({
                   <th className="p-3 text-left font-medium text-gray-600 whitespace-nowrap">
                     Nodes
                   </th>
-                  {isSlurm && (
+                  {isScheduler && (
                     <th className="p-3 text-left font-medium text-gray-600 whitespace-nowrap">
-                      Partition
+                      {subGroupLabel}
                     </th>
                   )}
-                  {!isSlurm && (
+                  {!isScheduler && (
                     <th className="p-3 text-left font-medium text-gray-600 whitespace-nowrap">
                       CPU
                     </th>
                   )}
-                  {!isSlurm && (
+                  {!isScheduler && (
                     <th className="p-3 text-left font-medium text-gray-600 whitespace-nowrap">
                       Memory
                     </th>
@@ -664,6 +708,13 @@ export function InfrastructureSection({
                     const requestable = Array.from(
                       typeEntry.requestableQtys || []
                     ).filter((qty) => qty !== undefined && qty !== null);
+                    // A sub-group can know its GPU model without knowing how
+                    // many of them it reaches (LSF queues): name the model,
+                    // and leave the counts and the bar as dashes rather than
+                    // implying zero.
+                    const hasCounts =
+                      typeEntry.gpu_total !== null &&
+                      typeEntry.gpu_total !== undefined;
                     return (
                       <>
                         <td className="p-3">
@@ -680,25 +731,34 @@ export function InfrastructureSection({
                             </span>
                           </NonCapitalizedTooltip>
                         </td>
-                        <td className="p-3 text-gray-500 tabular-nums whitespace-nowrap">
-                          <span
-                            className={`font-semibold ${
-                              typeEntry.gpu_free > 0
-                                ? 'text-gray-600'
-                                : 'text-gray-500'
-                            }`}
-                          >
-                            {typeEntry.gpu_free.toLocaleString()}
-                          </span>
-                          {' of '}
-                          {typeEntry.gpu_total.toLocaleString()} free
-                        </td>
-                        <td className="p-3">
-                          <CleanUtilizationBar
-                            gpu={typeEntry}
-                            className="w-full min-w-[140px]"
-                          />
-                        </td>
+                        {hasCounts ? (
+                          <>
+                            <td className="p-3 text-gray-500 tabular-nums whitespace-nowrap">
+                              <span
+                                className={`font-semibold ${
+                                  typeEntry.gpu_free > 0
+                                    ? 'text-gray-600'
+                                    : 'text-gray-500'
+                                }`}
+                              >
+                                {typeEntry.gpu_free.toLocaleString()}
+                              </span>
+                              {' of '}
+                              {typeEntry.gpu_total.toLocaleString()} free
+                            </td>
+                            <td className="p-3">
+                              <CleanUtilizationBar
+                                gpu={typeEntry}
+                                className="w-full min-w-[140px]"
+                              />
+                            </td>
+                          </>
+                        ) : (
+                          <>
+                            <td className="p-3 text-gray-400">-</td>
+                            <td className="p-3 text-gray-400">-</td>
+                          </>
+                        )}
                       </>
                     );
                   };
@@ -749,9 +809,9 @@ export function InfrastructureSection({
                         ) : (
                           <button
                             className="inline-flex items-center gap-1 text-gray-500 hover:text-gray-700"
-                            title={
-                              isExpanded ? 'Hide partitions' : 'Show partitions'
-                            }
+                            title={`${
+                              isExpanded ? 'Hide' : 'Show'
+                            } ${subGroupLabelLower}s`}
                             onClick={() => toggleExpanded(context)}
                           >
                             {isExpanded ? (
@@ -759,7 +819,7 @@ export function InfrastructureSection({
                             ) : (
                               <ChevronRightIcon className="w-4 h-4" />
                             )}
-                            {partitions.length} partition
+                            {partitions.length} {subGroupLabelLower}
                             {partitions.length === 1 ? '' : 's'}
                           </button>
                         )}
@@ -769,7 +829,7 @@ export function InfrastructureSection({
 
                   const renderSubRowCells = (subRow, index) => (
                     <>
-                      {isSlurm && renderPartitionCell(subRow, index)}
+                      {isScheduler && renderPartitionCell(subRow, index)}
                       {renderGpuCells(subRow ? subRow.type : null)}
                     </>
                   );
@@ -850,7 +910,7 @@ export function InfrastructureSection({
                         >
                           {!hasNodeData ? <SkeletonBadge /> : nodes.length}
                         </td>
-                        {!isSlurm && (
+                        {!isScheduler && (
                           <td
                             className={`${sharedCellClass} text-gray-500 tabular-nums whitespace-nowrap`}
                             rowSpan={subRowCount}
@@ -862,7 +922,7 @@ export function InfrastructureSection({
                             )}
                           </td>
                         )}
-                        {!isSlurm && (
+                        {!isScheduler && (
                           <td
                             className={`${sharedCellClass} text-gray-500 tabular-nums whitespace-nowrap`}
                             rowSpan={subRowCount}
@@ -932,7 +992,7 @@ export function InfrastructureSection({
                   value: jobsData[contextStatsKey]?.jobs || 0,
                 },
                 { label: 'Nodes', loading: !hasNodeData, value: nodes.length },
-                ...(!isSlurm
+                ...(!isScheduler
                   ? [
                       {
                         label: 'CPU',
@@ -1045,8 +1105,12 @@ export function ContextDetails({
   gpusInContext,
   nodesInContext,
   gpuMetricsRefreshTrigger = 0,
-  isSlurm = false,
+  isSlurm = false, // Back-compat alias for scheduler="slurm"
+  scheduler = null, // null | 'slurm' | 'lsf'
+  subGroupLabel = 'Partition',
 }) {
+  const schedulerKind = scheduler ?? (isSlurm ? 'slurm' : null);
+  const isScheduler = schedulerKind !== null;
   // Determine if this is an SSH context
   const isSSHContext = contextName.startsWith('ssh-');
   const displayTitle = isSSHContext ? 'Node Pool' : 'Context';
@@ -1196,9 +1260,9 @@ export function ContextDetails({
           GPUs component's return. */}
       <PluginSlot
         name="infra.contextDetail.statusPanel"
-        context={{ contextName, isSlurm }}
+        context={{ contextName, isSlurm, scheduler: schedulerKind }}
       />
-      <AllowedNodesHint contextName={contextName} isSlurm={isSlurm} />
+      <AllowedNodesHint contextName={contextName} scheduler={schedulerKind} />
       <div className="rounded-lg border bg-card text-card-foreground shadow-sm h-full">
         <div className="p-5">
           <div className="flex items-center justify-between mb-4">
@@ -1255,7 +1319,7 @@ export function ContextDetails({
                     <th className="p-3 text-left font-medium text-gray-600">
                       Node
                     </th>
-                    {!isSlurm && (
+                    {!isScheduler && (
                       <>
                         <th className="p-3 text-left font-medium text-gray-600">
                           IP Address
@@ -1268,9 +1332,9 @@ export function ContextDetails({
                         </th>
                       </>
                     )}
-                    {isSlurm && (
+                    {isScheduler && (
                       <th className="p-3 text-left font-medium text-gray-600">
-                        Partitions
+                        {subGroupLabel}s
                       </th>
                     )}
                     <th className="p-3 text-left font-medium text-gray-600">
@@ -1382,7 +1446,7 @@ export function ContextDetails({
                         <td className="p-3 whitespace-nowrap text-gray-700">
                           {node.node_name}
                         </td>
-                        {!isSlurm && (
+                        {!isScheduler && (
                           <>
                             <td className="p-3 whitespace-nowrap text-gray-700">
                               {node.ip_address || '-'}
@@ -1395,9 +1459,11 @@ export function ContextDetails({
                             </td>
                           </>
                         )}
-                        {isSlurm && (
+                        {isScheduler && (
                           <td className="p-3 whitespace-nowrap text-gray-700">
-                            {formatSlurmPartitions(node.partition)}
+                            {formatSlurmPartitions(
+                              node.partition ?? node.queue
+                            )}
                           </td>
                         )}
                         <td className="p-3 whitespace-nowrap text-gray-700">
@@ -1434,12 +1500,13 @@ export function ContextDetails({
             </div>
           )}
 
-          {/* GPU Metrics Section - only show for k8s contexts, not SSH node pools or Slurm */}
+          {/* GPU Metrics Section - only show for k8s contexts, not SSH node
+              pools or batch schedulers (no per-node exporter on those) */}
           {isGrafanaAvailable &&
             gpusInContext &&
             gpusInContext.length > 0 &&
             !isSSHContext &&
-            !isSlurm && (
+            !isScheduler && (
               <>
                 <h4 className="text-lg font-semibold mb-4 mt-6">GPU Metrics</h4>
 
@@ -2384,8 +2451,8 @@ function InfrastructureHint() {
               No Infrastructure Enabled
             </h3>
             <p className="text-sm text-gray-600 mb-4">
-              No cloud providers, Kubernetes contexts, SSH node pools, or Slurm
-              clusters are currently enabled or configured.
+              No cloud providers, Kubernetes contexts, SSH node pools, Slurm
+              clusters, or LSF clusters are currently enabled or configured.
             </p>
             <div className="space-y-2 mb-4">
               <p className="text-sm text-gray-600">
@@ -2483,6 +2550,14 @@ export function GPUs() {
   // Slurm clusters from ~/.slurm/config, independent of whether they answer a
   // query right now.
   const [configuredSlurmClusters, setConfiguredSlurmClusters] = useState([]);
+  const [allLsfGPUs, setAllLsfGPUs] = useState([]);
+  const [perClusterLsfGPUs, setPerClusterLsfGPUs] = useState([]);
+  const [perNodeLsfGPUs, setPerNodeLsfGPUs] = useState([]);
+  // Same for ~/.lsf/config: listed whether or not the login node answers.
+  const [configuredLsfClusters, setConfiguredLsfClusters] = useState([]);
+  // cluster -> queue rows. LSF hosts carry no queue column, so these come
+  // from the server rather than being rolled up from the nodes.
+  const [lsfQueues, setLsfQueues] = useState({});
   const [cloudInfraData, setCloudInfraData] = useState([]);
   const [totalClouds, setTotalClouds] = useState(0);
   // Separate cluster/job counts for Cloud panel (for progressive loading)
@@ -2506,6 +2581,10 @@ export function GPUs() {
   // Slurm loading state (separate from Kubernetes/SSH for parallel loading)
   const [slurmLoading, setSlurmLoading] = useState(true);
   const [slurmDataLoaded, setSlurmDataLoaded] = useState(false);
+
+  // LSF loading state (same shape as Slurm's, loaded in parallel)
+  const [lsfLoading, setLsfLoading] = useState(true);
+  const [lsfDataLoaded, setLsfDataLoaded] = useState(false);
 
   const [sshAndKubeJobsDataLoading, setSshAndKubeJobsDataLoading] =
     useState(true);
@@ -2541,6 +2620,7 @@ export function GPUs() {
         setCloudLoading(true);
         setSshLoading(true);
         setSlurmLoading(true);
+        setLsfLoading(true);
         setSshAndKubeJobsDataLoading(true);
         setClusterDataLoading(true);
         // Note: Don't reset kubeDataLoaded/cloudDataLoaded here - that would cause
@@ -2575,6 +2655,7 @@ export function GPUs() {
           fetchManagedJobsData(),
           fetchClusterStatsData(),
           fetchSlurmData(),
+          fetchLsfData(),
         ]);
 
         // Mark main fetch as done, check if we can set isFetching = false
@@ -2610,6 +2691,12 @@ export function GPUs() {
         setAllSlurmGPUs([]);
         setPerClusterSlurmGPUs([]);
         setPerNodeSlurmGPUs([]);
+        setLsfLoading(false);
+        setConfiguredLsfClusters([]);
+        setAllLsfGPUs([]);
+        setPerClusterLsfGPUs([]);
+        setPerNodeLsfGPUs([]);
+        setLsfQueues({});
         setSshAndKubeJobsData({});
         setSshAndKubeJobsDataLoading(false);
 
@@ -2626,6 +2713,7 @@ export function GPUs() {
           setCloudLoading(false);
           setSshLoading(false);
           setSlurmLoading(false);
+          setLsfLoading(false);
           setSshAndKubeJobsDataLoading(false);
           setClusterDataLoading(false);
         }
@@ -2861,6 +2949,31 @@ export function GPUs() {
     }
   };
 
+  // Fetch LSF data separately, in parallel with Kubernetes/SSH/Slurm
+  const fetchLsfData = async () => {
+    try {
+      const lsfData = await dashboardCache.get(getLsfInfrastructure);
+      if (lsfData) {
+        setConfiguredLsfClusters(lsfData.lsfClusterNames || []);
+        setAllLsfGPUs(lsfData.allLsfGPUs || []);
+        setPerClusterLsfGPUs(lsfData.perClusterLsfGPUs || []);
+        setPerNodeLsfGPUs(lsfData.perNodeLsfGPUs || []);
+        setLsfQueues(lsfData.lsfQueues || {});
+      }
+      setLsfDataLoaded(true);
+      setLsfLoading(false);
+    } catch (error) {
+      console.error('Error in fetchLsfData:', error);
+      setConfiguredLsfClusters([]);
+      setAllLsfGPUs([]);
+      setPerClusterLsfGPUs([]);
+      setPerNodeLsfGPUs([]);
+      setLsfQueues({});
+      setLsfDataLoaded(true);
+      setLsfLoading(false);
+    }
+  };
+
   // Fetch enabled clouds list fast (without counts) for progressive loading
   // Counts come from cloudClusterCounts and cloudJobCounts (computed separately)
   const fetchCloudData = async (forceRefresh) => {
@@ -3034,6 +3147,8 @@ export function GPUs() {
       setSshLoading(false);
       setSlurmLoading(false);
       setSlurmDataLoaded(false);
+      setLsfLoading(false);
+      setLsfDataLoaded(false);
       setIsInitialLoad(true);
       setSshAndKubeJobsDataLoading(false);
       setClusterDataLoading(false);
@@ -3062,6 +3177,7 @@ export function GPUs() {
     dashboardCache.invalidate(getCloudInfrastructure, [false]); // Keep for backwards compatibility
     dashboardCache.invalidate(getSSHNodePools);
     dashboardCache.invalidate(getSlurmInfrastructure);
+    dashboardCache.invalidate(getLsfInfrastructure);
 
     // Increment GPU metrics refresh trigger to force iframe reload
     setGpuMetricsRefreshTrigger((prev) => prev + 1);
@@ -3325,6 +3441,67 @@ export function GPUs() {
     }, {});
   }, [perNodeSlurmGPUs]);
 
+  // LSF clusters: same three-source union as Slurm's, for the same reason —
+  // ~/.lsf/config lists a cluster whose login node is unreachable, GPU
+  // availability only covers clusters that have GPUs, and node info covers
+  // every host. The queue map is a fourth source: a cluster can be configured
+  // with queues and nothing else.
+  const lsfClusters = React.useMemo(() => {
+    const clusterSet = new Set();
+    if (Array.isArray(configuredLsfClusters)) {
+      configuredLsfClusters.forEach((cluster) => {
+        if (cluster) clusterSet.add(cluster);
+      });
+    }
+    if (Array.isArray(perClusterLsfGPUs)) {
+      perClusterLsfGPUs.forEach((gpu) => {
+        if (gpu.cluster) clusterSet.add(gpu.cluster);
+      });
+    }
+    if (Array.isArray(perNodeLsfGPUs)) {
+      perNodeLsfGPUs.forEach((node) => {
+        if (node.cluster) clusterSet.add(node.cluster);
+      });
+    }
+    Object.keys(lsfQueues || {}).forEach((cluster) => {
+      if (cluster) clusterSet.add(cluster);
+    });
+    return [...clusterSet].sort();
+  }, [configuredLsfClusters, perClusterLsfGPUs, perNodeLsfGPUs, lsfQueues]);
+
+  const groupedPerClusterLsfGPUs = React.useMemo(() => {
+    if (!perClusterLsfGPUs) return {};
+    return perClusterLsfGPUs.reduce((acc, gpu) => {
+      const { cluster } = gpu;
+      if (!acc[cluster]) {
+        acc[cluster] = [];
+      }
+      acc[cluster].push(gpu);
+      return acc;
+    }, {});
+  }, [perClusterLsfGPUs]);
+
+  const groupedPerNodeLsfGPUs = React.useMemo(() => {
+    if (!perNodeLsfGPUs) return {};
+    return perNodeLsfGPUs.reduce((acc, node) => {
+      const { cluster } = node;
+      if (!acc[cluster]) {
+        acc[cluster] = [];
+      }
+      acc[cluster].push(node);
+      return acc;
+    }, {});
+  }, [perNodeLsfGPUs]);
+
+  // cluster -> sub-group rows, in the shape InfrastructureSection renders.
+  const groupedLsfQueues = React.useMemo(() => {
+    const grouped = {};
+    Object.entries(lsfQueues || {}).forEach(([cluster, queues]) => {
+      grouped[cluster] = aggregateLsfQueues(queues);
+    });
+    return grouped;
+  }, [lsfQueues]);
+
   // Group perNodeGPUs by context
   const groupedPerNodeGPUs = React.useMemo(() => {
     if (!perNodeGPUs) return {};
@@ -3345,9 +3522,11 @@ export function GPUs() {
       !cloudDataLoaded ||
       !kubeDataLoaded ||
       !slurmDataLoaded ||
+      !lsfDataLoaded ||
       kubeLoading ||
       cloudLoading ||
       slurmLoading ||
+      lsfLoading ||
       pluginInfraLoading
     ) {
       return false; // Still loading, don't show hint
@@ -3358,8 +3537,9 @@ export function GPUs() {
     const noSSH = sshContexts.length === 0;
     const noKubernetes = kubeContexts.length === 0;
     const noSlurm = slurmClusters.length === 0;
+    const noLsf = lsfClusters.length === 0;
 
-    return noCloud && noSSH && noKubernetes && noSlurm;
+    return noCloud && noSSH && noKubernetes && noSlurm && noLsf;
   })();
 
   // Check URL on component mount to set initial context
@@ -3404,16 +3584,23 @@ export function GPUs() {
 
   // Render context details
   const renderContextDetails = (contextName) => {
-    // Check if this is a Slurm cluster
+    // Which family this context belongs to. Names are bare, so a Slurm
+    // cluster and an LSF cluster of the same name would collide; Slurm is
+    // checked first, as it is for Kubernetes today.
     const isSlurmCluster = slurmClusters.includes(contextName);
+    const isLsfCluster = !isSlurmCluster && lsfClusters.includes(contextName);
 
     // Get the appropriate GPU and node data based on context type
     const gpusInContext = isSlurmCluster
       ? groupedPerClusterSlurmGPUs[contextName] || []
-      : groupedPerContextGPUs[contextName] || [];
+      : isLsfCluster
+        ? groupedPerClusterLsfGPUs[contextName] || []
+        : groupedPerContextGPUs[contextName] || [];
     const nodesInContext = isSlurmCluster
       ? groupedPerNodeSlurmGPUs[contextName] || []
-      : groupedPerNodeGPUs[contextName] || [];
+      : isLsfCluster
+        ? groupedPerNodeLsfGPUs[contextName] || []
+        : groupedPerNodeGPUs[contextName] || [];
 
     // Check if this is an SSH context
     const isSSHContext = contextName.startsWith('ssh-');
@@ -3434,14 +3621,15 @@ export function GPUs() {
       );
     }
 
-    // For Kubernetes and Slurm contexts, show the regular context details
+    // For Kubernetes, Slurm and LSF contexts, show the regular context details
     return (
       <ContextDetails
         contextName={contextName}
         gpusInContext={gpusInContext}
         nodesInContext={nodesInContext}
         gpuMetricsRefreshTrigger={gpuMetricsRefreshTrigger}
-        isSlurm={isSlurmCluster}
+        scheduler={isSlurmCluster ? 'slurm' : isLsfCluster ? 'lsf' : null}
+        subGroupLabel={isLsfCluster ? 'Queue' : 'Partition'}
       />
     );
   };
@@ -3708,6 +3896,32 @@ export function GPUs() {
     );
   };
 
+  const renderLsfInfrastructure = () => {
+    return (
+      <InfrastructureSection
+        title="LSF"
+        isLoading={lsfLoading}
+        isDataLoaded={lsfDataLoaded}
+        contexts={lsfClusters}
+        gpus={allLsfGPUs}
+        groupedPerContextGPUs={groupedPerClusterLsfGPUs}
+        groupedPerNodeGPUs={groupedPerNodeLsfGPUs}
+        handleContextClick={handleContextClick}
+        contextStats={contextStats}
+        jobsData={sshAndKubeJobsData}
+        isJobsDataLoading={sshAndKubeJobsDataLoading}
+        isClusterDataLoading={clusterDataLoading}
+        isSSH={false}
+        scheduler="lsf"
+        subGroups={groupedLsfQueues}
+        subGroupLabel="Queue"
+        contextWorkspaceMap={{}}
+        isInitialLoad={isInitialLoad}
+        statusByKey={extraStatusByKey}
+      />
+    );
+  };
+
   const renderKubernetesTab = () => {
     // If a context is selected, show its details immediately. Don't gate
     // on kubeLoading — the page-level fetch can take 5-10s on tenants
@@ -3773,6 +3987,15 @@ export function GPUs() {
         priority: 2, // Slurm gets priority 2 within same activity level
       });
 
+      // Add LSF section (always show)
+      const lsfHasActivity = lsfClusters.length > 0;
+      sections.push({
+        name: 'LSF',
+        render: renderLsfInfrastructure,
+        hasActivity: lsfHasActivity,
+        priority: 3, // LSF gets priority 3 within same activity level
+      });
+
       // Add Cloud section (always show)
       // Cloud section is active if there are any enabled clouds or
       // storage-only cloud rows.
@@ -3781,7 +4004,7 @@ export function GPUs() {
         name: 'Cloud',
         render: renderCloudInfrastructure,
         hasActivity: cloudHasActivity,
-        priority: 3, // Cloud gets priority 3 within same activity level
+        priority: 4, // Cloud gets priority 4 within same activity level
       });
 
       // Add SSH section (always show)
@@ -3790,7 +4013,7 @@ export function GPUs() {
         name: 'SSH Node Pool',
         render: renderSSHNodePoolInfrastructure,
         hasActivity: sshHasActivity,
-        priority: 4, // SSH gets priority 4 within same activity level
+        priority: 5, // SSH gets priority 5 within same activity level
       });
     }
 
@@ -3826,6 +4049,7 @@ export function GPUs() {
     kubeLoading ||
     cloudLoading ||
     slurmLoading ||
+    lsfLoading ||
     sshAndKubeJobsDataLoading ||
     clusterDataLoading ||
     isKubeContextsLoading ||
@@ -3834,7 +4058,11 @@ export function GPUs() {
 
   // Check if all data has been loaded at least once
   const isAllDataLoaded =
-    kubeDataLoaded && cloudDataLoaded && slurmDataLoaded && !isInitialLoad;
+    kubeDataLoaded &&
+    cloudDataLoaded &&
+    slurmDataLoaded &&
+    lsfDataLoaded &&
+    !isInitialLoad;
 
   // Update lastFetchedTime when loading completes (transitions from loading to not loading)
   useEffect(() => {
@@ -3945,7 +4173,8 @@ export function GPUs() {
           <h1
             className={`text-2xl font-semibold text-gray-900 leading-tight tracking-tight ${
               selectedContext.startsWith('ssh-') ||
-              slurmClusters.includes(selectedContext)
+              slurmClusters.includes(selectedContext) ||
+              lsfClusters.includes(selectedContext)
                 ? ''
                 : 'font-mono'
             }`}
@@ -3961,6 +4190,7 @@ export function GPUs() {
                 ? selectedContext.replace(/^ssh-/, '')
                 : selectedContext,
               isSlurm: slurmClusters.includes(selectedContext),
+              isLsf: lsfClusters.includes(selectedContext),
               isSsh: selectedContext.startsWith('ssh-'),
             }}
             wrapperClassName="flex items-center gap-2"

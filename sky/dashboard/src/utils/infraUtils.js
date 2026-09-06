@@ -11,22 +11,29 @@
  * @param {Object} options - Options for determining the context type
  * @param {boolean} [options.isSSH] - Whether this is an SSH Node Pool context
  * @param {boolean} [options.isSlurm] - Whether this is a Slurm cluster context
- * @param {string} [options.cloud] - Cloud type ('Kubernetes', 'SSH', 'slurm', or 'Slurm')
- * @returns {string} - The context stats key (e.g., 'kubernetes/my-context', 'ssh/pool1', 'slurm/cluster')
+ * @param {string} [options.scheduler] - Batch scheduler kind ('slurm' | 'lsf')
+ * @param {string} [options.cloud] - Cloud type ('Kubernetes', 'SSH', 'slurm', 'Slurm', or 'LSF')
+ * @returns {string} - The context stats key (e.g., 'kubernetes/my-context', 'ssh/pool1', 'slurm/cluster', 'lsf/cluster')
  */
 export function buildContextStatsKey(contextName, options = {}) {
   if (!contextName) {
     return null;
   }
 
-  const { isSSH, isSlurm, cloud } = options;
+  const { isSSH, isSlurm, scheduler, cloud } = options;
+  const cloudLower = cloud?.toLowerCase();
 
   // Determine context type from options or infer from context name
   let contextType = null;
   if (isSSH || cloud === 'SSH') {
     contextType = 'ssh';
-  } else if (isSlurm || cloud?.toLowerCase() === 'slurm') {
+  } else if (isSlurm || scheduler === 'slurm' || cloudLower === 'slurm') {
     contextType = 'slurm';
+  } else if (scheduler === 'lsf' || cloudLower === 'lsf') {
+    // Without this an LSF cluster keys as 'kubernetes/<name>', which both
+    // collides with a Kubernetes context of the same name and files the
+    // cluster's counts under the wrong section.
+    contextType = 'lsf';
   } else if (cloud === 'Kubernetes') {
     contextType = 'kubernetes';
   } else if (contextName.startsWith('ssh-')) {
@@ -52,7 +59,7 @@ export function buildContextStatsKey(contextName, options = {}) {
  * This is a convenience wrapper around buildContextStatsKey for the common
  * pattern where we have a cloud type and region/context name.
  *
- * @param {string} cloud - Cloud type ('Kubernetes', 'SSH', 'slurm', or 'Slurm')
+ * @param {string} cloud - Cloud type ('Kubernetes', 'SSH', 'slurm', 'Slurm', or 'LSF')
  * @param {string} region - Region/context name (may include 'ssh-' prefix for SSH)
  * @returns {string|null} - The context stats key or null if invalid
  */

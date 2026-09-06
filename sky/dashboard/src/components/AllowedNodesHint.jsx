@@ -45,8 +45,18 @@ function useAllowedNodesConfigured(context, skip) {
  * `allowed_nodes` is a Kubernetes-only concept, so this renders nothing for
  * Slurm contexts or SSH node pools (`ssh-<pool>`).
  */
-export function AllowedNodesHint({ contextName, isSlurm = false }) {
-  const skip = isSlurm || !contextName || contextName.startsWith('ssh-');
+export function AllowedNodesHint({
+  contextName,
+  isSlurm = false,
+  scheduler = null,
+}) {
+  // `allowed_nodes` is a Kubernetes-only config, so every batch scheduler
+  // skips this hint, not just Slurm.
+  const skip =
+    isSlurm ||
+    scheduler !== null ||
+    !contextName ||
+    contextName.startsWith('ssh-');
   const configured = useAllowedNodesConfigured(contextName, skip);
 
   if (skip || !configured) {

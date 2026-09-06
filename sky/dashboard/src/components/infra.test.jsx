@@ -282,3 +282,109 @@ describe('InfrastructureSection Kubernetes GPU-type rows', () => {
     );
   });
 });
+
+// LSF gets the same section component with `scheduler="lsf"`, but its
+// sub-groups (queues) are supplied rather than derived: an LSF host does not
+// report which queues serve it.
+describe('InfrastructureSection LSF queue rows', () => {
+  const lsfNode = (nodeName, gpuName, total, free) => ({
+    node_name: nodeName,
+    queue: '',
+    gpu_name: gpuName,
+    gpu_total: total,
+    gpu_free: free,
+    cluster: 'dtu',
+  });
+
+  const renderLsf = (props = {}) =>
+    renderSection({
+      title: 'LSF',
+      contexts: ['dtu'],
+      scheduler: 'lsf',
+      subGroupLabel: 'Queue',
+      gpus: [{ gpu_name: 'V100', gpu_total: 8, gpu_free: 3 }],
+      groupedPerContextGPUs: {
+        dtu: [{ gpu_name: 'V100', gpu_total: 8, gpu_free: 3 }],
+      },
+      groupedPerNodeGPUs: {
+        dtu: [lsfNode('n-1', 'V100', 4, 2), lsfNode('n-2', 'V100', 4, 1)],
+      },
+      subGroups: {
+        dtu: [
+          {
+            name: 'hpc',
+            isDefault: true,
+            types: [null],
+          },
+          {
+            name: 'gpuv100',
+            isDefault: false,
+            types: [
+              {
+                gpu_name: 'V100',
+                gpu_total: null,
+                gpu_free: null,
+                requestableQtys: [1, 2, 4],
+              },
+            ],
+          },
+        ],
+      },
+      ...props,
+    });
+
+  it('labels the sub-group column Queue, not Partition', () => {
+    const { container } = renderLsf();
+    const headers = Array.from(
+      container.querySelectorAll('table thead th')
+    ).map(normalize);
+    expect(headers).toContain('Queue');
+    expect(headers).not.toContain('Partition');
+    // Like Slurm, the scheduler owns CPU/memory accounting, so those columns
+    // are not shown.
+    expect(headers).not.toContain('CPU');
+  });
+
+  it('identifies its rows as LSF for plugin slots', () => {
+    const { container } = renderLsf();
+    const slot = container.querySelector('[data-row-kind]');
+    expect(slot.getAttribute('data-row-kind')).toBe('lsf');
+    expect(slot.getAttribute('data-row-id')).toBe('dtu');
+  });
+
+  it('collapses to the cluster totals, counting the queues', () => {
+    const { container } = renderLsf();
+    const rows = tableRows(container);
+    expect(rows).toHaveLength(1);
+    expect(cellTexts(rows[0])).toContain('2 queues');
+  });
+
+  it('shows the queue GPU model without inventing counts for it', () => {
+    const { container } = renderLsf();
+    fireEvent.click(screen.getAllByTitle('Show queues')[0]);
+    const rows = tableRows(container);
+    // Cluster totals row, then one row per queue.
+    expect(rows).toHaveLength(3);
+
+    const gpuQueueRow = cellTexts(rows[2]);
+    expect(gpuQueueRow[0]).toBe('gpuv100');
+    expect(gpuQueueRow).toContain('V100');
+    // The cluster knows 3 of 8 are free; the queue does not know how many
+    // hosts serve it, so its counts read as dashes rather than as zero.
+    expect(gpuQueueRow.join(' ')).not.toMatch(/free/);
+
+    // A CPU-only queue still gets a row.
+    expect(cellTexts(rows[1])[0]).toBe('hpc(default)');
+  });
+
+  it('still supplies queues when the cluster answers nothing', () => {
+    const { container } = renderLsf({
+      gpus: [],
+      groupedPerContextGPUs: {},
+      groupedPerNodeGPUs: {},
+    });
+    const rows = tableRows(container);
+    expect(rows).toHaveLength(1);
+    expect(cellTexts(rows[0])).toContain('2 queues');
+  });
+});
