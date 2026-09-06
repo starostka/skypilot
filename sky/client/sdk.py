@@ -3424,6 +3424,94 @@ def slurm_node_info(
     return server_common.get_request_id(response)
 
 
+@usage_lib.entrypoint
+@server_common.check_server_healthy_or_start
+@versions.minimal_api_version(24)
+@annotations.client_api
+def realtime_lsf_gpu_availability(
+        name_filter: Optional[str] = None,
+        quantity_filter: Optional[int] = None,
+        lsf_cluster_name: Optional[str] = None) -> server_common.RequestId:
+    """Gets the real-time LSF GPU availability.
+
+    Args:
+        name_filter: Optional name filter for GPUs.
+        quantity_filter: Optional quantity filter for GPUs.
+        lsf_cluster_name: Optional LSF cluster name to filter by.
+
+    Returns:
+        The request ID of the LSF GPU availability request.
+    """
+    body = payloads.LsfGpuAvailabilityRequestBody(
+        lsf_cluster_name=lsf_cluster_name,
+        name_filter=name_filter,
+        quantity_filter=quantity_filter,
+    )
+    response = server_common.make_authenticated_request(
+        'POST',
+        '/lsf_gpu_availability',
+        json=json.loads(body.model_dump_json()),
+    )
+    return server_common.get_request_id(response)
+
+
+@usage_lib.entrypoint
+@server_common.check_server_healthy_or_start
+@versions.minimal_api_version(24)
+@annotations.client_api
+def lsf_node_info(
+        lsf_cluster_name: Optional[str] = None) -> server_common.RequestId:
+    """Gets the resource information for all nodes in the LSF cluster.
+
+    Returns:
+        The request ID of the LSF node info request.
+
+    Request Returns:
+        List[Dict[str, Any]]: A list of dictionaries, each containing info
+            for a single LSF host (node_name, lsf_cluster_name, queue,
+            node_state, gpu_type, total_gpus, free_gpus, vcpu_count,
+            memory_gb, free_vcpus, cpu_load, free_memory_gb).
+    """
+    body = payloads.LsfNodeInfoRequestBody(lsf_cluster_name=lsf_cluster_name)
+    response = server_common.make_authenticated_request(
+        'POST',
+        '/lsf_node_info',
+        json=json.loads(body.model_dump_json()),
+    )
+    return server_common.get_request_id(response)
+
+
+@usage_lib.entrypoint
+@server_common.check_server_healthy_or_start
+@versions.minimal_api_version(24)
+@annotations.client_api
+def lsf_queue_info(lsf_cluster_name: Optional[str] = None,
+                   live: bool = True) -> server_common.RequestId:
+    """Gets the queues of the LSF cluster(s).
+
+    Args:
+        lsf_cluster_name: Optional LSF cluster name to filter by.
+        live: Enrich the configured queues with `bqueues` state. Costs one
+            login-node connection per cluster.
+
+    Returns:
+        The request ID of the LSF queue info request.
+
+    Request Returns:
+        List[Dict[str, Any]]: One dictionary per queue (lsf_cluster_name,
+            queue, is_default, gpu_type, gpu_count_per_host, status, njobs,
+            pend, run).
+    """
+    body = payloads.LsfQueueInfoRequestBody(lsf_cluster_name=lsf_cluster_name,
+                                            live=live)
+    response = server_common.make_authenticated_request(
+        'POST',
+        '/lsf_queue_info',
+        json=json.loads(body.model_dump_json()),
+    )
+    return server_common.get_request_id(response)
+
+
 # =====================
 # = Debug Dump =
 # =====================

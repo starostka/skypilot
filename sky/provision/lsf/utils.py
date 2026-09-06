@@ -4,6 +4,8 @@ import re
 import shlex
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
 
+from sky import clouds
+from sky import exceptions
 from sky import sky_logging
 from sky import skypilot_config
 from sky.adaptors import lsf
@@ -11,6 +13,7 @@ from sky.provision.lsf import creds
 from sky.utils import annotations
 from sky.utils import common_utils
 from sky.utils import gpu_names
+from sky.utils import subprocess_utils
 
 logger = sky_logging.init_logger(__name__)
 
@@ -620,3 +623,194 @@ def get_default_walltime(cluster: str) -> str:
         default_value=DEFAULT_WALLTIME)
     validate_walltime(str(walltime))
     return str(walltime)
+
+
+def lsf_cluster_names() -> List[str]:
+    """Names of the LSF clusters this server is configured with.
+
+    Derived from ~/.lsf/config and the ``allowed_clusters`` config alone —
+    nothing here contacts a login node and no credential is minted, so a
+    cluster that is currently unreachable is still reported, and the call
+    answers for a dashboard with no cluster running.
+    """
+    return clouds.Lsf.existing_allowed_clusters()
+
+
+def lsf_queue_info(lsf_cluster_name: Optional[str] = None,
+                   live: bool = True) -> List[Dict[str, Any]]:
+    """Queue information for the LSF cluster(s).
+
+    A queue is LSF's analogue of a Slurm partition, but the data flows the
+    other way. Slurm reads partitions off each node (`sinfo -N`) and rolls
+    them up; LSF's `bhosts` carries no queue column, and host->queue
+    membership is only available through free-form `bqueues -l` output plus
+    host-group expansion. The GPU shape of a queue is therefore taken from
+    the SkyPilot config, which is already the provisioner's authority for it
+    (see get_configured_queues and check_instance_fits).
+
+    Args:
+        lsf_cluster_name: The cluster to report. If None, aggregates over all
+            existing allowed clusters.
+        live: Enrich with `bqueues -w` state (status, pending/running counts).
+            Each enriched cluster costs one login-node connection, and with
+            per-user credentials one certificate mint; the configured shape is
+            still returned when this is off or the query fails.
+
+    Returns:
+        One dict per (cluster, queue) with keys: lsf_cluster_name, queue,
+        is_default, gpu_type, gpu_count_per_host, status, njobs, pend, run.
+        The last four are None when live state is unavailable.
+    """
+    clusters_to_query = ([lsf_cluster_name] if lsf_cluster_name is not None
+                         else clouds.Lsf.existing_allowed_clusters())
+    if not clusters_to_query:
+        return []
+
+    def _query_cluster(cluster: str) -> List[Dict[str, Any]]:
+        configured = get_configured_queues(cluster)
+        live_queues: Dict[str, lsf.LsfQueueInfo] = {}
+        if live:
+            try:
+                live_queues = {
+                    q.name: q for q in make_client(cluster).get_queues_info()
+                }
+            except Exception as e:  # pylint: disable=broad-except
+                # A queue list from config is still worth showing; losing the
+                # live counts is not worth losing the cluster.
+                logger.debug(f'Could not query LSF queues on {cluster!r}: '
+                             f'{common_utils.format_exception(e)}')
+
+        names = list(configured.keys()) or list(live_queues.keys())
+        rows = []
+        for index, name in enumerate(names):
+            gpu_info = configured.get(name)
+            live_info = live_queues.get(name)
+            rows.append({
+                'lsf_cluster_name': cluster,
+                'queue': name,
+                # The provisioner takes the first configured queue as the
+                # default landing place for work that names no accelerator.
+                'is_default': index == 0,
+                'gpu_type': gpu_info.gpu_type if gpu_info else None,
+                'gpu_count_per_host': gpu_info.gpu_count if gpu_info else None,
+                'status': live_info.status if live_info else None,
+                'njobs': live_info.njobs if live_info else None,
+                'pend': live_info.pend if live_info else None,
+                'run': live_info.run if live_info else None,
+            })
+        return rows
+
+    if lsf_cluster_name is not None:
+        return _query_cluster(lsf_cluster_name)
+
+    def _safe_query(cluster: str) -> List[Dict[str, Any]]:
+        try:
+            return _query_cluster(cluster)
+        except Exception as e:  # pylint: disable=broad-except
+            logger.warning(f'Skipping LSF cluster {cluster!r} while '
+                           f'collecting queue info: '
+                           f'{common_utils.format_exception(e)}')
+            return []
+
+    return [
+        row for rows in subprocess_utils.run_in_parallel(
+            _safe_query, clusters_to_query) for row in rows
+    ]
+
+
+def _get_lsf_node_info_list(lsf_cluster_name: str) -> List[Dict[str, Any]]:
+    """Node information for one LSF cluster, from one login-node session.
+
+    Four commands, each degrading on its own: `bhosts -w` is the host roster,
+    `bhosts -gpu -w` the GPU inventory, `lshosts -w` the static shape and
+    `lsload -w` the current load. Only the roster is required.
+    """
+    client = make_client(lsf_cluster_name)
+
+    hosts = client.get_hosts()
+    if not hosts:
+        return []
+    resources = {r.host: r for r in client.get_host_resources()}
+    load = {load_info.host: load_info for load_info in client.get_host_load()}
+
+    gpus_by_host: Dict[str, List[lsf.GpuHostInfo]] = {}
+    for gpu in client.get_gpu_hosts():
+        gpus_by_host.setdefault(gpu.host, []).append(gpu)
+
+    nodes = []
+    for host in hosts:
+        host_gpus = gpus_by_host.get(host.host, [])
+        gpu_type = (canonicalize_lsf_gpu_model(host_gpus[0].model)
+                    if host_gpus else None)
+        free_gpus = sum(1 for gpu in host_gpus if gpu.is_free)
+        host_resources = resources.get(host.host)
+        host_load = load.get(host.host)
+        nodes.append({
+            'node_name': host.host,
+            'lsf_cluster_name': lsf_cluster_name,
+            # LSF does not report a host's queues; see lsf_queue_info.
+            'queue': '',
+            'node_state': host.status,
+            'gpu_type': gpu_type,
+            'total_gpus': len(host_gpus),
+            # A host LSF will not dispatch to has nothing free, whatever the
+            # per-GPU counters say — same rule Slurm applies to down/drained.
+            'free_gpus': free_gpus if host.is_usable else 0,
+            'vcpu_count': host_resources.ncpus if host_resources else None,
+            'memory_gb': (host_resources.max_memory_gb
+                          if host_resources else None),
+            'free_vcpus': host.free_slots,
+            # LSF exposes no portable per-host memory reservation view.
+            'free_alloc_memory_gb': None,
+            'cpu_load': host_load.cpu_load if host_load else None,
+            'free_memory_gb': (host_load.free_memory_gb
+                               if host_load else None),
+        })
+    return nodes
+
+
+def lsf_node_info(
+        lsf_cluster_name: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Detailed information for each node in the LSF cluster(s).
+
+    Args:
+        lsf_cluster_name: The cluster to query. If None, aggregates over all
+            existing allowed clusters.
+
+    Returns:
+        One dict per node; see _get_lsf_node_info_list for the keys. They
+        match the Slurm equivalents so that the dashboard renders both with
+        the same cells.
+
+    An explicitly requested cluster returns [] on failure rather than raising,
+    and aggregation never lets one unreachable cluster hide the nodes of the
+    reachable ones.
+    """
+    if lsf_cluster_name is not None:
+        try:
+            return _get_lsf_node_info_list(lsf_cluster_name)
+        except (FileNotFoundError, RuntimeError, ValueError,
+                exceptions.CommandError,
+                exceptions.NotSupportedError) as e:
+            logger.debug(f'Could not retrieve LSF node info: {e}')
+            return []
+
+    clusters_to_query = clouds.Lsf.existing_allowed_clusters()
+    if not clusters_to_query:
+        return []
+
+    def _query_cluster(cluster: str) -> List[Dict[str, Any]]:
+        try:
+            return _get_lsf_node_info_list(cluster)
+        except Exception as e:  # pylint: disable=broad-except
+            # run_in_parallel re-raises the first exception, so anything
+            # escaping here would drop every cluster's nodes.
+            logger.warning(f'Skipping LSF cluster {cluster!r} while '
+                           f'collecting node info: '
+                           f'{common_utils.format_exception(e)}')
+            return []
+
+    return [
+        node for nodes in subprocess_utils.run_in_parallel(
+            _query_cluster, clusters_to_query) for node in nodes
+    ]

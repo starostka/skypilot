@@ -808,6 +808,19 @@ class SlurmNodeInfoRequestBody(RequestBody):
     slurm_cluster_name: Optional[str] = None
 
 
+class LsfNodeInfoRequestBody(RequestBody):
+    """The request body for the LSF node info endpoint."""
+    lsf_cluster_name: Optional[str] = None
+
+
+class LsfQueueInfoRequestBody(RequestBody):
+    """The request body for the LSF queue info endpoint."""
+    lsf_cluster_name: Optional[str] = None
+    # Enriching with `bqueues` costs a login-node connection per cluster, and
+    # one credential mint on a per-user-credential deployment.
+    live: bool = True
+
+
 class ListAcceleratorsBody(RequestBody):
     """The request body for the list accelerators endpoint."""
     gpus_only: bool = True
@@ -1050,6 +1063,13 @@ class RequestPayload(BasePayload):
 class SlurmGpuAvailabilityRequestBody(RequestBody):
     """Request body for getting Slurm real-time GPU availability."""
     slurm_cluster_name: Optional[str] = None
+    name_filter: Optional[str] = None
+    quantity_filter: Optional[int] = None
+
+
+class LsfGpuAvailabilityRequestBody(RequestBody):
+    """Request body for getting LSF real-time GPU availability."""
+    lsf_cluster_name: Optional[str] = None
     name_filter: Optional[str] = None
     quantity_filter: Optional[int] = None
 

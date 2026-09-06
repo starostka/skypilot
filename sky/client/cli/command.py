@@ -4895,11 +4895,15 @@ def _show_gpus_impl(
         # Optimization - do not poll for Kubernetes API for fetching
         # common GPUs because that will be fetched later for the table after
         # common GPUs.
+        # LSF is excluded for a stronger reason than optimization: its catalog
+        # is live-only, so listing it here opens an SSH session to the login
+        # node inside the generic cloud loop — slow at best, and on a
+        # deployment whose credentials are minted per request, a failure.
         clouds_to_list: Union[Optional[str], List[str]] = cloud_name
         if cloud_name is None:
             clouds_to_list = [
                 c for c in constants.ALL_CLOUDS
-                if c != 'kubernetes' and c != 'ssh' and c != 'slurm'
+                if c not in ('kubernetes', 'ssh', 'slurm', 'lsf')
             ]
 
         k8s_messages = ''

@@ -91,6 +91,57 @@ class GpuHostInfo(NamedTuple):
         return self.njobs == 0
 
 
+class HostInfo(NamedTuple):
+    """One host's slot occupancy, from `bhosts -w`."""
+    host: str
+    # `ok`, `closed_Full`, `closed_Adm`, `closed_Busy`, `closed_Excl`,
+    # `unavail`, `unreach`, ...
+    status: str
+    # Slot limits are `-` (unlimited) on many configurations, hence Optional.
+    max_slots: Optional[int]
+    njobs: int
+    run: int
+
+    @property
+    def is_usable(self) -> bool:
+        """Whether LSF would dispatch new work here.
+
+        `closed_Full` and `closed_Busy` are transient — the host is in service
+        and simply has nothing free — so they stay usable; an administratively
+        closed or unreachable host does not.
+        """
+        return not (self.status.startswith('unavail') or
+                    self.status.startswith('unreach') or
+                    self.status.startswith('closed_Adm'))
+
+    @property
+    def free_slots(self) -> Optional[int]:
+        if self.max_slots is None:
+            return None
+        return max(0, self.max_slots - self.njobs)
+
+
+class HostResources(NamedTuple):
+    """One host's static resources, from `lshosts -w`."""
+    host: str
+    model: str
+    ncpus: Optional[int]
+    max_memory_gb: Optional[float]
+
+
+class LoadInfo(NamedTuple):
+    """One host's current load, from `lsload -w`.
+
+    Best-effort: `lsload` is a monitoring command and some sites restrict it,
+    so every field here is optional and the caller must render without it.
+    """
+    host: str
+    status: str
+    # 1-minute run queue length.
+    cpu_load: Optional[float]
+    free_memory_gb: Optional[float]
+
+
 class JobInfo(NamedTuple):
     """Basic information about an LSF job from `bjobs`."""
     job_id: str
@@ -230,6 +281,130 @@ def parse_bhosts_gpu_output(output: str) -> List[GpuHostInfo]:
             raise RuntimeError(f'Failed to parse GPU info from line: {line!r}. '
                                f'Error: {e}') from e
     return gpus
+
+
+def _parse_optional_int(value: str) -> Optional[int]:
+    """LSF prints `-` for "no limit" / "not available" in numeric columns."""
+    if value == '-':
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _parse_lsf_size_gb(value: str) -> Optional[float]:
+    """Parses an LSF size such as `125.8G`, `64000M` or `2T` into GB.
+
+    A bare number is interpreted as megabytes: that is LSF's default unit for
+    limits (LSF_UNIT_FOR_LIMITS), and `-w` output only omits the suffix when
+    the site has left it at the default.
+    """
+    if not value or value == '-':
+        return None
+    multipliers = {'K': 1 / 1024**2, 'M': 1 / 1024, 'G': 1.0, 'T': 1024.0}
+    suffix = value[-1].upper()
+    try:
+        if suffix in multipliers:
+            return float(value[:-1]) * multipliers[suffix]
+        return float(value) / 1024
+    except ValueError:
+        return None
+
+
+def parse_bhosts_output(output: str) -> List[HostInfo]:
+    """Parses `bhosts -w` output.
+
+    Columns: HOST_NAME STATUS JL/U MAX NJOBS RUN SSUSP USUSP RSV. Unlike
+    `bhosts -gpu`, there are no continuation rows: one line per host.
+
+    Malformed lines are skipped rather than fatal — this feeds a dashboard
+    panel, and one odd host should not blank the cluster.
+    """
+    hosts = []
+    for line in output.splitlines():
+        line = line.strip()
+        if not line or line.startswith('HOST_NAME'):
+            continue
+        parts = line.split()
+        if len(parts) < 9:
+            logger.debug(f'Skipping unparseable bhosts line: {line!r}')
+            continue
+        njobs = _parse_optional_int(parts[4])
+        run = _parse_optional_int(parts[5])
+        if njobs is None or run is None:
+            logger.debug(f'Skipping unparseable bhosts line: {line!r}')
+            continue
+        hosts.append(
+            HostInfo(host=parts[0],
+                     status=parts[1],
+                     max_slots=_parse_optional_int(parts[3]),
+                     njobs=njobs,
+                     run=run))
+    return hosts
+
+
+def parse_lshosts_output(output: str) -> List[HostResources]:
+    """Parses `lshosts -w` output.
+
+    Columns: HOST_NAME type model cpuf ncpus maxmem maxswp server RESOURCES.
+    RESOURCES is free-form and may be absent, so only the fixed prefix is
+    read.
+    """
+    hosts = []
+    for line in output.splitlines():
+        line = line.strip()
+        if not line or line.startswith('HOST_NAME'):
+            continue
+        parts = line.split()
+        if len(parts) < 6:
+            logger.debug(f'Skipping unparseable lshosts line: {line!r}')
+            continue
+        hosts.append(
+            HostResources(host=parts[0],
+                          model=parts[2],
+                          ncpus=_parse_optional_int(parts[4]),
+                          max_memory_gb=_parse_lsf_size_gb(parts[5])))
+    return hosts
+
+
+def parse_lsload_output(output: str) -> List[LoadInfo]:
+    """Parses `lsload -w` output.
+
+    Columns: HOST_NAME status r15s r1m r15m ut pg ls it tmp swp mem.
+
+    A host LIM cannot reach prints its name and `unavail` and stops there —
+    two fields, not twelve dashes (verified against DTU: 394 full rows, 3
+    short ones). Those hosts are still reported, with no load, so a caller
+    joining on host name does not silently lose them.
+    """
+    loads = []
+    for line in output.splitlines():
+        line = line.strip()
+        if not line or line.startswith('HOST_NAME'):
+            continue
+        parts = line.split()
+        if len(parts) == 2:
+            loads.append(
+                LoadInfo(host=parts[0],
+                         status=parts[1],
+                         cpu_load=None,
+                         free_memory_gb=None))
+            continue
+        if len(parts) < 12:
+            logger.debug(f'Skipping unparseable lsload line: {line!r}')
+            continue
+        cpu_load: Optional[float]
+        try:
+            cpu_load = float(parts[3])
+        except ValueError:
+            cpu_load = None
+        loads.append(
+            LoadInfo(host=parts[0],
+                     status=parts[1],
+                     cpu_load=cpu_load,
+                     free_memory_gb=_parse_lsf_size_gb(parts[11])))
+    return loads
 
 
 def _output_matches(output: str, patterns: Tuple[str, ...]) -> bool:
@@ -459,6 +634,41 @@ class LsfClient:
             logger.debug(f'bhosts -gpu failed (no GPU hosts?): {stdout}')
             return []
         return parse_bhosts_gpu_output(stdout)
+
+    def get_hosts(self) -> List[HostInfo]:
+        """Returns host slot occupancy from `bhosts -w`.
+
+        Returns an empty list on failure: this feeds the Infra page, where a
+        missing panel is better than a failed page.
+        """
+        cmd = 'bhosts -w'
+        rc, stdout, stderr = self._run_lsf_cmd(cmd)
+        if rc != 0:
+            logger.debug(f'bhosts failed: {stdout}\n{stderr}')
+            return []
+        return parse_bhosts_output(stdout)
+
+    def get_host_resources(self) -> List[HostResources]:
+        """Returns static host resources from `lshosts -w`."""
+        cmd = 'lshosts -w'
+        rc, stdout, stderr = self._run_lsf_cmd(cmd)
+        if rc != 0:
+            logger.debug(f'lshosts failed: {stdout}\n{stderr}')
+            return []
+        return parse_lshosts_output(stdout)
+
+    def get_host_load(self) -> List[LoadInfo]:
+        """Returns current host load from `lsload -w`.
+
+        Best-effort by design: `lsload` is a monitoring command that some
+        sites restrict to administrators.
+        """
+        cmd = 'lsload -w'
+        rc, stdout, stderr = self._run_lsf_cmd(cmd)
+        if rc != 0:
+            logger.debug(f'lsload failed (restricted?): {stdout}\n{stderr}')
+            return []
+        return parse_lsload_output(stdout)
 
     def get_env(self) -> Dict[str, str]:
         """Fetches environment variables from the login node."""

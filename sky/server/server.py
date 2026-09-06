@@ -57,6 +57,7 @@ from sky.jobs.server import server as jobs_rest
 from sky.metrics import utils as metrics_utils
 from sky.provision import metadata_utils
 from sky.provision.kubernetes import utils as kubernetes_utils
+from sky.provision.lsf import utils as lsf_utils
 from sky.provision.slurm import utils as slurm_utils
 from sky.recipes import server as recipes_rest
 from sky.schemas.api import responses
@@ -1612,6 +1613,77 @@ async def slurm_cluster_names(request: fastapi.Request) -> None:
         request_name=request_names.RequestName.SLURM_CLUSTER_NAMES,
         request_body=payloads.RequestBody(),
         func=slurm_utils.slurm_cluster_names,
+        schedule_type=requests_lib.ScheduleType.SHORT,
+        auth_user=request.state.auth_user,
+    )
+
+
+@app.post('/lsf_gpu_availability')
+async def lsf_gpu_availability(
+        request: fastapi.Request,
+        lsf_gpu_availability_body: payloads.LsfGpuAvailabilityRequestBody
+) -> None:
+    """Gets real-time LSF GPU availability."""
+    await executor.schedule_request_async(
+        request_id=request.state.request_id,
+        request_name=request_names.RequestName.REALTIME_LSF_GPU_AVAILABILITY,
+        request_body=lsf_gpu_availability_body,
+        func=core.realtime_lsf_gpu_availability,
+        schedule_type=requests_lib.ScheduleType.SHORT,
+        # LSF credentials are brokered per caller: without auth_user the
+        # request env hook never runs and the worker cannot mint one.
+        auth_user=request.state.auth_user,
+    )
+
+
+@app.post('/lsf_node_info')
+async def lsf_node_info(
+        request: fastapi.Request,
+        lsf_node_info_body: payloads.LsfNodeInfoRequestBody) -> None:
+    """Gets detailed information for each node in the LSF cluster."""
+    await executor.schedule_request_async(
+        request_id=request.state.request_id,
+        request_name=request_names.RequestName.LSF_NODE_INFO,
+        request_body=lsf_node_info_body,
+        func=lsf_utils.lsf_node_info,
+        schedule_type=requests_lib.ScheduleType.SHORT,
+        auth_user=request.state.auth_user,
+    )
+
+
+@app.post('/lsf_queue_info')
+async def lsf_queue_info(
+        request: fastapi.Request,
+        lsf_queue_info_body: payloads.LsfQueueInfoRequestBody) -> None:
+    """Lists the queues of the LSF cluster(s), with live state when asked.
+
+    Queues are LSF's analogue of Slurm partitions, but they come from the
+    SkyPilot config rather than from the nodes: `bhosts` carries no queue
+    column, and host->queue membership is only in free-form `bqueues -l`.
+    """
+    await executor.schedule_request_async(
+        request_id=request.state.request_id,
+        request_name=request_names.RequestName.LSF_QUEUE_INFO,
+        request_body=lsf_queue_info_body,
+        func=lsf_utils.lsf_queue_info,
+        schedule_type=requests_lib.ScheduleType.SHORT,
+        auth_user=request.state.auth_user,
+    )
+
+
+@app.post('/lsf_cluster_names')
+async def lsf_cluster_names(request: fastapi.Request) -> None:
+    """Lists the names of the LSF clusters this server is configured with.
+
+    Answers from ~/.lsf/config alone — no login-node connection and no
+    credential mint — so it covers clusters that are currently unreachable,
+    unlike /lsf_node_info and /lsf_gpu_availability.
+    """
+    await executor.schedule_request_async(
+        request_id=request.state.request_id,
+        request_name=request_names.RequestName.LSF_CLUSTER_NAMES,
+        request_body=payloads.RequestBody(),
+        func=lsf_utils.lsf_cluster_names,
         schedule_type=requests_lib.ScheduleType.SHORT,
         auth_user=request.state.auth_user,
     )

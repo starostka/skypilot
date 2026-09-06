@@ -609,3 +609,153 @@ class TestSelfTermination:
         # pylint: disable=protected-access
         assert lsf_instance._terminate_from_inside_allocation('sky-x') is False
         run.assert_not_called()
+
+
+class TestQueueInfo:
+    """Queues come from config; live `bqueues` state is enrichment only."""
+
+    def _queues(self):
+        return {
+            'hpc': lsf_utils.QueueGpuInfo(gpu_type=None, gpu_count=0),
+            'gpuv100': lsf_utils.QueueGpuInfo(gpu_type='V100', gpu_count=4),
+        }
+
+    def test_configured_shape_with_live_state(self, monkeypatch):
+        monkeypatch.setattr(lsf_utils, 'get_configured_queues',
+                            lambda cluster: self._queues())
+        client = mock.Mock()
+        client.get_queues_info.return_value = [
+            lsf.LsfQueueInfo(name='gpuv100',
+                             priority=50,
+                             status='Open:Active',
+                             njobs=7,
+                             pend=2,
+                             run=5),
+        ]
+        monkeypatch.setattr(lsf_utils, 'make_client', lambda cluster: client)
+
+        rows = lsf_utils.lsf_queue_info('dtu')
+        assert [r['queue'] for r in rows] == ['hpc', 'gpuv100']
+        # The first configured queue is where unaccelerated work lands.
+        assert rows[0]['is_default'] and not rows[1]['is_default']
+        assert rows[1]['gpu_type'] == 'V100'
+        assert rows[1]['gpu_count_per_host'] == 4
+        assert rows[1]['run'] == 5
+        # Configured but not reported live: shape without counts.
+        assert rows[0]['status'] is None
+
+    def test_live_failure_keeps_the_configured_queues(self, monkeypatch):
+        monkeypatch.setattr(lsf_utils, 'get_configured_queues',
+                            lambda cluster: self._queues())
+
+        def _boom(cluster):
+            raise RuntimeError('login node unreachable')
+
+        monkeypatch.setattr(lsf_utils, 'make_client', _boom)
+
+        rows = lsf_utils.lsf_queue_info('dtu')
+        assert [r['queue'] for r in rows] == ['hpc', 'gpuv100']
+        assert all(r['status'] is None for r in rows)
+
+    def test_live_false_makes_no_connection(self, monkeypatch):
+        monkeypatch.setattr(lsf_utils, 'get_configured_queues',
+                            lambda cluster: self._queues())
+        make_client = mock.Mock()
+        monkeypatch.setattr(lsf_utils, 'make_client', make_client)
+
+        rows = lsf_utils.lsf_queue_info('dtu', live=False)
+        assert len(rows) == 2
+        make_client.assert_not_called()
+
+
+class TestNodeInfo:
+    """Node rows key on the same names as Slurm's, so the UI renders both."""
+
+    @staticmethod
+    def _client():
+        client = mock.Mock()
+        client.get_hosts.return_value = [
+            lsf.HostInfo(host='n-1',
+                         status='ok',
+                         max_slots=20,
+                         njobs=4,
+                         run=4),
+            lsf.HostInfo(host='n-2',
+                         status='closed_Adm',
+                         max_slots=20,
+                         njobs=0,
+                         run=0),
+        ]
+        client.get_host_resources.return_value = [
+            lsf.HostResources(host='n-1',
+                              model='IntelXeon',
+                              ncpus=20,
+                              max_memory_gb=125.8),
+        ]
+        client.get_host_load.return_value = [
+            lsf.LoadInfo(host='n-1',
+                         status='ok',
+                         cpu_load=1.2,
+                         free_memory_gb=100.0),
+        ]
+        client.get_gpu_hosts.return_value = [
+            lsf.GpuHostInfo(host='n-1',
+                            gpu_id=0,
+                            model='TeslaV100_PCIE_32GB',
+                            njobs=0,
+                            run=0),
+            lsf.GpuHostInfo(host='n-1',
+                            gpu_id=1,
+                            model='TeslaV100_PCIE_32GB',
+                            njobs=1,
+                            run=1),
+            lsf.GpuHostInfo(host='n-2',
+                            gpu_id=0,
+                            model='TeslaV100_PCIE_32GB',
+                            njobs=0,
+                            run=0),
+        ]
+        return client
+
+    def test_node_rows(self, monkeypatch):
+        monkeypatch.setattr(lsf_utils, 'make_client',
+                            lambda cluster: self._client())
+        nodes = {n['node_name']: n for n in lsf_utils.lsf_node_info('dtu')}
+
+        n1 = nodes['n-1']
+        assert n1['lsf_cluster_name'] == 'dtu'
+        assert n1['gpu_type'] == 'V100-32GB'
+        assert n1['total_gpus'] == 2 and n1['free_gpus'] == 1
+        assert n1['vcpu_count'] == 20 and n1['free_vcpus'] == 16
+        assert n1['memory_gb'] == 125.8
+        assert n1['cpu_load'] == 1.2 and n1['free_memory_gb'] == 100.0
+
+    def test_unusable_host_has_nothing_free(self, monkeypatch):
+        monkeypatch.setattr(lsf_utils, 'make_client',
+                            lambda cluster: self._client())
+        nodes = {n['node_name']: n for n in lsf_utils.lsf_node_info('dtu')}
+
+        # The GPU is idle, but LSF will not dispatch to an administratively
+        # closed host, so reporting it as available would be a lie.
+        n2 = nodes['n-2']
+        assert n2['total_gpus'] == 1 and n2['free_gpus'] == 0
+
+    def test_missing_optional_commands(self, monkeypatch):
+        client = self._client()
+        client.get_host_resources.return_value = []
+        client.get_host_load.return_value = []
+        monkeypatch.setattr(lsf_utils, 'make_client', lambda cluster: client)
+
+        n1 = lsf_utils.lsf_node_info('dtu')[0]
+        assert n1['vcpu_count'] is None
+        assert n1['cpu_load'] is None
+        # The roster and the GPU inventory still came through.
+        assert n1['total_gpus'] == 2
+
+    def test_explicit_cluster_failure_is_empty_not_raised(self, monkeypatch):
+
+        def _boom(cluster):
+            raise RuntimeError('login node unreachable')
+
+        monkeypatch.setattr(lsf_utils, 'make_client', _boom)
+        assert lsf_utils.lsf_node_info('dtu') == []

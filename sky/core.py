@@ -1945,6 +1945,88 @@ def realtime_slurm_gpu_availability(
     return availability_lists
 
 
+def realtime_lsf_gpu_availability(
+    lsf_cluster_name: Optional[str] = None,
+    name_filter: Optional[str] = None,
+    quantity_filter: Optional[int] = None,
+    env_vars: Optional[Dict[str, str]] = None,
+    **kwargs,
+) -> List[Tuple[str, List[models.RealtimeGpuAvailability], Optional[str]]]:
+    """Gets LSF real-time GPU availability, grouped by cluster.
+
+    The LSF counterpart of realtime_slurm_gpu_availability: same return shape,
+    same failure contract. Backed by `bhosts -gpu` through the LSF catalog.
+
+    Args:
+        lsf_cluster_name: Optional LSF cluster to filter by.
+        name_filter: Optional name filter for GPUs.
+        quantity_filter: Optional quantity filter for GPUs.
+        env_vars: Environment variables (may be needed for backend).
+        kwargs: Additional keyword arguments.
+
+    Returns:
+        One (cluster_name, availability_list, error) tuple per cluster that
+        has GPUs or failed to answer. A cluster that answered and simply has
+        no matching GPUs is omitted rather than reported as an error.
+    """
+    del env_vars, kwargs  # Currently unused
+
+    if lsf_cluster_name is None:
+        lsf_cluster_names = clouds.Lsf.existing_allowed_clusters()
+    else:
+        lsf_cluster_names = [lsf_cluster_name]
+
+    def realtime_lsf_gpu_availability_single(
+        cluster_name: str,
+    ) -> Tuple[List[models.RealtimeGpuAvailability], Optional[str]]:
+        try:
+            accelerator_counts, total_capacity, total_available = (
+                catalog.list_accelerator_realtime(
+                    gpus_only=True,
+                    name_filter=name_filter,
+                    region_filter=cluster_name,
+                    quantity_filter=quantity_filter,
+                    clouds='lsf',
+                    case_sensitive=False,
+                ))
+        except ValueError as e:
+            # "No matching GPUs" is not a failure: a CPU-only cluster is
+            # healthy, and reporting it as an error puts a red badge on the
+            # Infra page for a cluster that answered perfectly well.
+            logger.debug(f'No matching GPUs in LSF cluster '
+                         f'{cluster_name!r}: '
+                         f'{common_utils.format_exception(e)}')
+            return [], None
+        except Exception as e:  # pylint: disable=broad-except
+            logger.debug(f'Error querying LSF cluster {cluster_name!r}: '
+                         f'{common_utils.format_exception(e, use_bracket=True)}')
+            return [], (f'Could not query LSF cluster for info: '
+                        f'{common_utils.format_exception(e)}')
+
+        realtime_gpu_availability_list: List[
+            models.RealtimeGpuAvailability] = []
+        for gpu_type, _ in sorted(accelerator_counts.items()):
+            realtime_gpu_availability_list.append(
+                models.RealtimeGpuAvailability(
+                    gpu_type,
+                    accelerator_counts.pop(gpu_type),
+                    total_capacity[gpu_type],
+                    total_available[gpu_type],
+                ))
+        return realtime_gpu_availability_list, None
+
+    parallel_queried = subprocess_utils.run_in_parallel(
+        realtime_lsf_gpu_availability_single, lsf_cluster_names)
+    availability_lists: List[Tuple[str, List[models.RealtimeGpuAvailability],
+                                   Optional[str]]] = []
+    for name, (queried, error) in zip(lsf_cluster_names, parallel_queried):
+        if len(queried) == 0 and error is None:
+            logger.debug(f'No gpus found in LSF cluster {name}')
+            continue
+        availability_lists.append((name, queried, error))
+    return availability_lists
+
+
 # =================
 # = Local Cluster =
 # =================

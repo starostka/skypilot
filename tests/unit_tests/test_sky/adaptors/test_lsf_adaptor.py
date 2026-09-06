@@ -246,3 +246,97 @@ class TestStateSets:
         total = (len(lsf.PENDING_STATES) + len(lsf.RUNNING_STATES) +
                  len(lsf.SUSPENDED_STATES) + len(lsf.TERMINAL_STATES))
         assert len(all_states) == total
+
+
+# Captured from DTU HPC (LSF 10.1) alongside the fixtures above. The three
+# awkward cases are all real: `bhosts` reports the LSF master hosts with MAX 0
+# and a `-` slot limit, `lshosts` prints `-` for every resource of a host LIM
+# cannot reach, and `lsload` truncates such a host to two fields rather than
+# printing twelve dashes (394 full rows to 3 short ones on the day this was
+# taken).
+BHOSTS_OUTPUT = """\
+HOST_NAME          STATUS          JL/U    MAX  NJOBS    RUN  SSUSP  USUSP    RSV 
+lsf10-prod-sl      closed_Adm      -      0      0      0      0      0      0
+n-62-11-1          ok              -     40      0      0      0      0      0
+n-62-11-16         closed_Full     -     32     32     22      0      0     10
+n-62-31-1          unavail         -      1      0      0      0      0      0
+"""
+
+LSHOSTS_OUTPUT = """\
+HOST_NAME                       type       model  cpuf ncpus maxmem maxswp server RESOURCES
+n-62-11-1                     X86_64 XeonGold6230   1.0    40 376.9G  35.9G    Yes (avx avx2 avx512 optane localssd0 localssd1)
+n-62-31-1                 UNKNOWN_AUTO_DETECT XeonGold6126   1.0     -      -      -    Yes (parallel_ serial_ avx avx2 avx512)
+"""
+
+LSLOAD_OUTPUT = """\
+HOST_NAME               status  r15s   r1m  r15m   ut    pg  ls    it   tmp   swp   mem
+n-62-29-6                   ok   0.0   0.1   0.0   0%   0.0   0 11569  735G 35.9G 122.6G
+n-62-31-1               unavail
+"""
+
+
+class TestHostParsers:
+
+    def test_bhosts_slot_occupancy(self):
+        hosts = {h.host: h for h in lsf.parse_bhosts_output(BHOSTS_OUTPUT)}
+        assert set(hosts) == {
+            'lsf10-prod-sl', 'n-62-11-1', 'n-62-11-16', 'n-62-31-1'
+        }
+        assert hosts['n-62-11-1'].max_slots == 40
+        assert hosts['n-62-11-1'].free_slots == 40
+        # A full host: every slot taken, so nothing free — but MAX is a slot
+        # limit, not a GPU count.
+        assert hosts['n-62-11-16'].njobs == 32
+        assert hosts['n-62-11-16'].free_slots == 0
+        # `-` in JL/U is a per-user limit, not the MAX column; MAX 0 on the
+        # LSF master hosts is a real zero.
+        assert hosts['lsf10-prod-sl'].max_slots == 0
+
+    def test_bhosts_usability(self):
+        hosts = {h.host: h for h in lsf.parse_bhosts_output(BHOSTS_OUTPUT)}
+        # Full is transient: the host is in service and simply has nothing
+        # free right now.
+        assert hosts['n-62-11-1'].is_usable
+        assert hosts['n-62-11-16'].is_usable
+        # Administratively closed and unavailable are not.
+        assert not hosts['lsf10-prod-sl'].is_usable
+        assert not hosts['n-62-31-1'].is_usable
+
+    def test_lshosts_sizes_and_units(self):
+        hosts = {h.host: h for h in lsf.parse_lshosts_output(LSHOSTS_OUTPUT)}
+        assert hosts['n-62-11-1'].ncpus == 40
+        assert hosts['n-62-11-1'].max_memory_gb == pytest.approx(376.9)
+        assert hosts['n-62-11-1'].model == 'XeonGold6230'
+        # An unreachable host prints `-` for every resource. RESOURCES is
+        # free-form and longer here, which must not disturb the fixed prefix.
+        assert hosts['n-62-31-1'].ncpus is None
+        assert hosts['n-62-31-1'].max_memory_gb is None
+        assert hosts['n-62-31-1'].model == 'XeonGold6126'
+
+    def test_lsload_reports_a_truncated_unavail_row(self):
+        loads = {
+            load.host: load for load in lsf.parse_lsload_output(LSLOAD_OUTPUT)
+        }
+        assert loads['n-62-29-6'].cpu_load == pytest.approx(0.1)
+        assert loads['n-62-29-6'].free_memory_gb == pytest.approx(122.6)
+        # Two fields, not twelve dashes. The host must still be listed, or a
+        # caller joining on host name loses it without noticing.
+        assert loads['n-62-31-1'].status == 'unavail'
+        assert loads['n-62-31-1'].cpu_load is None
+        assert loads['n-62-31-1'].free_memory_gb is None
+
+    def test_unreadable_lines_are_skipped_not_fatal(self):
+        output = BHOSTS_OUTPUT + 'this is not a host row\n'
+        assert len(lsf.parse_bhosts_output(output)) == 4
+        # A truncated row that is neither a full record nor the two-field
+        # unavail form is dropped rather than half-parsed.
+        assert len(lsf.parse_lsload_output(LSLOAD_OUTPUT + 'a b c\n')) == 2
+
+    def test_megabytes_and_terabytes(self):
+        # DTU prints G throughout, but LSF emits whatever unit fits and a bare
+        # number when the site leaves LSF_UNIT_FOR_LIMITS at its default (MB).
+        # pylint: disable=protected-access
+        assert lsf._parse_lsf_size_gb('64000M') == pytest.approx(62.5)
+        assert lsf._parse_lsf_size_gb('2048') == pytest.approx(2.0)
+        assert lsf._parse_lsf_size_gb('2T') == pytest.approx(2048.0)
+        assert lsf._parse_lsf_size_gb('-') is None

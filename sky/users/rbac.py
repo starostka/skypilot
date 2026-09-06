@@ -243,6 +243,22 @@ _DEFAULT_VIEWER_ALLOWLIST = [
         'method': 'POST'
     },
     {
+        'path': '/lsf_gpu_availability',
+        'method': 'POST'
+    },
+    {
+        'path': '/lsf_node_info',
+        'method': 'POST'
+    },
+    {
+        'path': '/lsf_queue_info',
+        'method': 'POST'
+    },
+    {
+        'path': '/lsf_cluster_names',
+        'method': 'POST'
+    },
+    {
         'path': '/status_kubernetes',
         'method': 'GET'
     },
