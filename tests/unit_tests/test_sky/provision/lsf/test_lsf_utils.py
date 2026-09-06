@@ -169,8 +169,10 @@ class TestBsubScript:
         assert '#BSUB -q gpuv100\n' in script
         assert '#BSUB -n 4\n' in script
         assert '#BSUB -R "span[hosts=1]"\n' in script
-        # 16 GB over 4 slots -> 4096 MB per slot.
-        assert '#BSUB -R "rusage[mem=4096MB]"\n' in script
+        # The FULL request per slot, not divided across them: MEMLIMIT
+        # tracks the per-slot figure, so dividing capped the job at 1/cpus of
+        # what it asked for and LSF killed it with TERM_MEMLIMIT (5548644e).
+        assert '#BSUB -R "rusage[mem=16384MB]"\n' in script
         assert '#BSUB -gpu "num=2:mode=exclusive_process"\n' in script
         assert '#BSUB -W 24:00\n' in script
         assert ('#BSUB -o /zhome/ab/c/12345/.sky_provision/lsf-%J.out'
