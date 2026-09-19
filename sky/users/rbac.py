@@ -318,6 +318,15 @@ _DEFAULT_VIEWER_ALLOWLIST = [
         'path': '/dashboard/*',
         'method': 'GET'
     },
+    # The bare spelling is registered against the SAME handler as
+    # '/dashboard/{full_path}' so that a proxy which normalises the trailing
+    # slash away does not bounce between the two; see serve_dashboard(). The
+    # glob above does not cover it, so a viewer would be denied the index page
+    # while being allowed every asset under it.
+    {
+        'path': '/dashboard',
+        'method': 'GET'
+    },
     # /dashboard_config exposes admin-configured UI settings (e.g.
     # external_links shown next to logs). The viewer dashboard
     # rendering reads it on every page load.
