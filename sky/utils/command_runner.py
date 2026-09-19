@@ -1827,7 +1827,11 @@ class KubernetesCommandRunner(CommandRunner):
             log_path=log_path,
             stream_logs=stream_logs,
             max_retry=max_retry,
-            prefix_command=(f'chmod +x {helper_path} && ' + (
+            # Best-effort: the helper ships executable, and on a read-only
+            # install (a Nix store path, say) the chmod fails and takes the
+            # rsync down with it -- "Operation not permitted", then
+            # "Failed to rsync up". Nothing here needs it to succeed.
+            prefix_command=(f'chmod +x {helper_path} 2>/dev/null || true; ' + (
                 '' if self.container is None else
                 f'SKYPILOT_K8S_EXEC_CONTAINER={shlex.quote(self.container)} ')),
             # rsync with `kubectl` as the rsh command will cause ~/xx parsed as
@@ -2118,11 +2122,35 @@ class SlurmCommandRunner(SlurmLoginNodeCommandRunner):
                 self.ssh_base_command(ssh_mode=SshMode.NON_INTERACTIVE,
                                       port_forward=None,
                                       connect_timeout=None))
+            # This transport runs a NON-login shell, so a site that exports
+            # Slurm from /etc/profile.d (Gefion: z01_slurm.sh) never puts srun
+            # on PATH, and provisioning dies at the file sync with
+            # "srun: command not found" / rsync "(code 127)".
+            #
+            # `bash --login` cannot simply replace it: this is rsync's
+            # transport, and a banner printed to stdout by a profile script
+            # would be injected straight into rsync's binary protocol stream.
+            # So the login shell runs only to RESOLVE the PATH, in a subshell
+            # whose stdout is captured and whose last line is taken (discarding
+            # any banner), and srun is exec'd with a clean stdout. The
+            # `case "$P" in /*)` guard keeps a site that prints something
+            # unexpected from clobbering PATH with garbage.
+            #
+            # `printf %q` quotes at RUNTIME, inside the script, and that is
+            # load-bearing: quoting it here instead would be stripped by the
+            # local shell when it parses this line, leaving ssh -- which
+            # flattens argv into one string the remote shell re-parses -- to
+            # hand the remote an unquoted snippet.
+            #
+            # Only this branch needs it. The `slurm_user` path below goes
+            # through wrap_command_as_user, i.e. `su --login`, which sources
+            # the profile already.
             script_content = f"""#!/bin/bash
 job_id=$(echo "$1" | cut -d+ -f1)
 node_list=$(echo "$1" | cut -d+ -f2)
 shift
-exec {ssh_command} srun --unbuffered --quiet --overlap {extra_srun_args}\\
+prep='P="$(bash -lc "printenv PATH" 2>/dev/null | tail -n 1)"; case "$P" in /*) PATH="$P";; esac; export PATH; exec "$0" "$@"'
+exec {ssh_command} bash -c "$(printf '%q' "$prep")" srun --unbuffered --quiet --overlap {extra_srun_args}\\
     --jobid="$job_id" --nodelist="$node_list" --nodes=1 --ntasks=1 "$@"
 """
             encoded_info = f'{self.job_id}+{self.slurm_node}'
