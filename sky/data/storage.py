@@ -3071,7 +3071,7 @@ class GcsStore(AbstractStore):
                 subprocess.check_output(remove_obj_command,
                                         stderr=subprocess.STDOUT,
                                         shell=True,
-                                        executable='/bin/bash')
+                                        executable=shutil.which('bash'))
                 return True
             except subprocess.CalledProcessError as e:
                 with ux_utils.print_exception_no_traceback():

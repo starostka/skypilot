@@ -9,6 +9,7 @@ TODO:
 """
 import os
 import shlex
+import shutil
 import subprocess
 import time
 import urllib.parse
@@ -164,7 +165,7 @@ class GcsCloudStorage(CloudStorage):
                            stdout=subprocess.PIPE,
                            shell=True,
                            check=True,
-                           executable='/bin/bash')
+                           executable=shutil.which('bash'))
         out = p.stdout.decode().strip()
         # Edge Case: Gcloud command is run for first time #437
         out = out.split('\n')[-1]

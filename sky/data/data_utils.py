@@ -5,6 +5,7 @@ import enum
 from multiprocessing import pool
 import os
 import re
+import shutil
 import subprocess
 import textwrap
 import time
@@ -705,7 +706,7 @@ def run_upload_cli(command: str, access_denied_message: str, bucket_name: str,
         require_outputs=True,
         # We need to use bash as some of the cloud commands uses bash syntax,
         # such as [[ ... ]]
-        executable='/bin/bash',
+        executable=shutil.which('bash'),
         log_cmd=True)
     if access_denied_message in stderr:
         with ux_utils.print_exception_no_traceback():

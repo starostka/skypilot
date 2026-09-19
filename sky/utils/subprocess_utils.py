@@ -6,6 +6,7 @@ import os
 import random
 import resource
 import shlex
+import shutil
 import subprocess
 import sys
 import termios
@@ -22,6 +23,7 @@ from sky import sky_logging
 from sky.adaptors import common as adaptors_common
 from sky.skylet import log_lib
 from sky.skylet import subprocess_daemon
+from sky.utils import annotations
 from sky.utils import common_utils
 from sky.utils import timeline
 from sky.utils import ux_utils
@@ -146,6 +148,27 @@ def _fallback_children(parent_pid: int,
     return descendants
 
 
+@annotations.lru_cache(scope='global')
+def _bash_executable() -> Optional[str]:
+    """Absolute path to bash, or None to let the shell default apply.
+
+    `/bin/bash` is not universal: a NixOS host has only /bin/sh, so the
+    literal path made every shell-using call here raise
+
+        FileNotFoundError: [Errno 2] No such file or directory: '/bin/bash'
+
+    which surfaces far from its cause -- as a failed `sky logs`, or as
+    SkyPilot seeming unable to find a file it had just written.
+
+    Falling back to None rather than a guess: subprocess then uses
+    /bin/sh, which is POSIX-guaranteed. Callers that genuinely need bash
+    semantics pass `executable=` themselves. `shutil.which` is the same
+    resolution upstream already uses for shell-completion install in
+    sky/client/cli/command.py.
+    """
+    return shutil.which('bash')
+
+
 @timeline.event
 def run(cmd, **kwargs):
     # Should be careful to use this function, as the child process cmd spawn may
@@ -153,7 +176,7 @@ def run(cmd, **kwargs):
     # rid of this problem, use `log_lib.run_with_log`.
     shell = kwargs.pop('shell', True)
     check = kwargs.pop('check', True)
-    executable = kwargs.pop('executable', '/bin/bash')
+    executable = kwargs.pop('executable', _bash_executable())
     if not shell:
         executable = None
     return subprocess.run(cmd,

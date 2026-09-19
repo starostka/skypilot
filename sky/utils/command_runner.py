@@ -7,6 +7,7 @@ import pathlib
 import pty
 import re
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -1375,13 +1376,17 @@ class SSHCommandRunner(CommandRunner):
             if stream_logs:
                 command += [
                     f'| tee {log_path}',
-                    # This also requires the executor to be '/bin/bash' instead
-                    # of the default '/bin/sh'.
+                    # This also requires the executor to be bash instead
+                    # of the default '/bin/sh' -- PIPESTATUS is a bashism.
                     '; exit ${PIPESTATUS[0]}'
                 ]
             else:
                 command += [f'> {log_path}']
-            executable = '/bin/bash'
+            # Resolved, not hardcoded: this runs LOCALLY, and a NixOS host
+            # has no /bin/bash. Hardcoding it made every log-capturing call
+            # die with `FileNotFoundError: ... '/bin/bash'` -- which is what
+            # broke `sky logs` and `sky exec` against a working cluster.
+            executable = shutil.which('bash')
 
         try:
             result = log_lib.run_with_log(' '.join(command),
@@ -1698,13 +1703,17 @@ class KubernetesCommandRunner(CommandRunner):
             if stream_logs:
                 command += [
                     f'| tee {log_path}',
-                    # This also requires the executor to be '/bin/bash' instead
-                    # of the default '/bin/sh'.
+                    # This also requires the executor to be bash instead
+                    # of the default '/bin/sh' -- PIPESTATUS is a bashism.
                     '; exit ${PIPESTATUS[0]}'
                 ]
             else:
                 command += [f'> {log_path}']
-            executable = '/bin/bash'
+            # Resolved, not hardcoded: this runs LOCALLY, and a NixOS host
+            # has no /bin/bash. Hardcoding it made every log-capturing call
+            # die with `FileNotFoundError: ... '/bin/bash'` -- which is what
+            # broke `sky logs` and `sky exec` against a working cluster.
+            executable = shutil.which('bash')
 
         if ssh_mode == SshMode.INTERACTIVE:
             # Use PIPE instead of DEVNULL for stdin so the remote process
@@ -1906,13 +1915,17 @@ class LocalProcessCommandRunner(CommandRunner):
             if stream_logs:
                 command += [
                     f'| tee {log_path}',
-                    # This also requires the executor to be '/bin/bash' instead
-                    # of the default '/bin/sh'.
+                    # This also requires the executor to be bash instead
+                    # of the default '/bin/sh' -- PIPESTATUS is a bashism.
                     '; exit ${PIPESTATUS[0]}'
                 ]
             else:
                 command += [f'> {log_path}']
-            executable = '/bin/bash'
+            # Resolved, not hardcoded: this runs LOCALLY, and a NixOS host
+            # has no /bin/bash. Hardcoding it made every log-capturing call
+            # die with `FileNotFoundError: ... '/bin/bash'` -- which is what
+            # broke `sky logs` and `sky exec` against a working cluster.
+            executable = shutil.which('bash')
         command_str = ' '.join(command)
         # For local process, the API server might not have this python path
         # setup. But this command runner should only be triggered from the API
