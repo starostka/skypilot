@@ -2,6 +2,7 @@
 # pylint: disable=protected-access
 import errno
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -66,7 +67,12 @@ def test_unset_step_scoped_slurm_env():
                       list(_JOB_SCOPED_VARS))
     script = slurm.UNSET_STEP_SCOPED_SLURM_ENV + '\n' + probe
     env = {**_STEP_SCOPED_VARS, **_JOB_SCOPED_VARS, 'PATH': '/usr/bin:/bin'}
-    out = subprocess.run(['/bin/bash', '-c', script],
+    # Resolved rather than hardcoded: a NixOS host has no /bin/bash at all
+    # (only /bin/sh), so the literal path made this test unrunnable there
+    # while saying nothing about the code under test.
+    bash = shutil.which('bash')
+    assert bash is not None, 'bash is required to run this test'
+    out = subprocess.run([bash, '-c', script],
                          env=env,
                          capture_output=True,
                          text=True,

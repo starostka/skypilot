@@ -2145,7 +2145,20 @@ class SlurmCommandRunner(SlurmLoginNodeCommandRunner):
             # Only this branch needs it. The `slurm_user` path below goes
             # through wrap_command_as_user, i.e. `su --login`, which sources
             # the profile already.
-            script_content = f"""#!/bin/bash
+            # `/usr/bin/env bash`, not `/bin/bash`: this script is written
+            # and EXECUTED LOCALLY -- it is rsync's `-e` transport -- and a
+            # NixOS client has no /bin/bash at all, only /bin/sh. The failure
+            # is opaque, because rsync reports the missing INTERPRETER as a
+            # missing script:
+            #
+            #   rsync: [sender] Failed to exec /tmp/tmpXXXX.sh:
+            #          No such file or directory (2)
+            #   rsync error: error in IPC code (code 14) at pipe.c(85)
+            #
+            # which reads as "SkyPilot did not write its own temp file".
+            # /usr/bin/env is present on NixOS and on every conventional
+            # distro, so this is strictly more portable than what it replaces.
+            script_content = f"""#!/usr/bin/env bash
 job_id=$(echo "$1" | cut -d+ -f1)
 node_list=$(echo "$1" | cut -d+ -f2)
 shift
