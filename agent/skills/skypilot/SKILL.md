@@ -1,6 +1,6 @@
 ---
 name: skypilot
-description: "Use when launching cloud VMs, Kubernetes pods, or Slurm jobs for GPU/TPU/CPU workloads, training or fine-tuning models on cloud GPUs, deploying inference servers (vllm, TGI, etc.) with autoscaling, writing or debugging SkyPilot task YAML files, using spot/preemptible instances for cost savings, comparing GPU prices across clouds, managing compute across 25+ clouds, Kubernetes, Slurm, and on-prem clusters with failover between them, troubleshooting resource availability or SkyPilot errors, or optimizing cost and GPU availability."
+description: "Use when launching cloud VMs, Kubernetes pods, Slurm or LSF jobs for GPU/TPU/CPU workloads, training or fine-tuning models on cloud GPUs, deploying inference servers (vllm, TGI, etc.) with autoscaling, writing or debugging SkyPilot task YAML files, using spot/preemptible instances for cost savings, comparing GPU prices across clouds, managing compute across 25+ clouds, Kubernetes, Slurm, LSF, and on-prem clusters with failover between them, troubleshooting resource availability or SkyPilot errors, or optimizing cost and GPU availability."
 ---
 
 # SkyPilot Skill
@@ -229,6 +229,48 @@ resources:
   infra: aws             # User asked for AWS specifically
   accelerators: H100:8
 ```
+
+## LSF Clusters
+
+LSF (IBM Spectrum LSF) is a batch scheduler, reached like Slurm: SkyPilot SSHes
+to a login node and submits with `bsub`. It is **not in upstream SkyPilot** —
+`sky check` lists it only on a build that carries `sky/provision/lsf/`.
+
+**The queue is part of the target, and that is the one thing to get right:**
+
+```bash
+sky launch --infra lsf/<cluster>/<queue> --gpus H100:2 -- nvidia-smi
+```
+
+LSF selects the GPU model **by queue name**, and there is no way to ask it
+which queue reaches which GPU — `bhosts` has no queue column. So the
+queue→GPU map is declared in config (`lsf.cluster_configs.<cluster>.queues`),
+and `sky gpus list --infra lsf` reports exactly what was declared and nothing
+else. A queue that is not in that map cannot be launched into.
+
+**What LSF does not support**, and these are deliberate rather than missing:
+
+| Feature | Why |
+| --- | --- |
+| `num_nodes: > 1` | one allocation is one host |
+| file mounts / storage | no object-store integration |
+| `image_id` (docker) | jobs run on the host, not in a container |
+| `sky stop` | an allocation is held or released, never paused |
+| open ports | the job is reached through a reverse tunnel, not a public IP |
+
+`sky down` works, and so does **autostop with `--down`** — the job kills
+itself with `bkill` from inside the allocation. Use it. An LSF allocation is
+held until released or until walltime expires, so a forgotten cluster costs
+the queue its GPUs for hours.
+
+**Debugging:**
+
+- `sky check lsf` runs `lsid` on the login node through `bash -lc`. A failure
+  here is SSH or a missing `~/.lsf/config`, not the scheduler.
+- A cluster stuck in `INIT` is a PEND. `bjobs -o pend_reason` on the login node
+  says why; raise `lsf.provision_timeout` if the queue is simply busy.
+- `bsub` directives `-J -q -n -o -e -gpu` cannot be overridden through
+  `bsub_options`; SkyPilot owns them and drops them with a warning.
 
 ## Cluster Lifecycle
 
