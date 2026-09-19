@@ -31,7 +31,7 @@ import shlex
 import subprocess
 import tempfile
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, cast, Dict, List, Optional, Tuple
 
 import colorama
 
@@ -1269,7 +1269,10 @@ def get_command_runners(
     # The SkyPilot key: enrolled in the user's authorized_keys at provision
     # time, accepted by the in-job sshd (and by the login node, though the
     # proxy hop uses the configured LSF identity).
-    ssh_private_key = credentials.get('ssh_private_key')
+    # `**credentials: Dict[str, Any]` is upstream's signature for every
+    # provider's get_command_runners, and it types each VALUE as a dict --
+    # so the str this actually carries needs saying explicitly.
+    ssh_private_key = cast(Optional[str], credentials.get('ssh_private_key'))
 
     instances = [
         instance_infos[0] for instance_infos in cluster_info.instances.values()

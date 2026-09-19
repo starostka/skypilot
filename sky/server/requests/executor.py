@@ -49,9 +49,9 @@ from sky.server import metrics as metrics_lib
 from sky.server import plugins
 from sky.server import versions
 from sky.server.requests import payloads
-from sky.server.requests import request_env
 from sky.server.requests import preconditions
 from sky.server.requests import process
+from sky.server.requests import request_env
 from sky.server.requests import request_names
 from sky.server.requests import requests as api_requests
 from sky.server.requests import threads

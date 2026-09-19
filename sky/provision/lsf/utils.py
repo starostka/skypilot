@@ -298,6 +298,11 @@ def get_lsf_credentials(cluster: str) -> creds.LsfCredentials:
 def make_client(cluster: str) -> lsf.LsfClient:
     """Build an LsfClient for the given cluster alias."""
     credentials = get_lsf_credentials(cluster)
+    # get_lsf_credentials() raises when neither the credential source nor
+    # submit_as_user yields an account, so this holds by construction; the
+    # NamedTuple field stays Optional for the sources that legitimately omit
+    # it.
+    assert credentials.user is not None, cluster
     return lsf.LsfClient(
         credentials.host,
         credentials.port,
@@ -309,9 +314,8 @@ def make_client(cluster: str) -> lsf.LsfClient:
     )
 
 
-def make_client_from_ssh_config(
-        ssh_config_dict: Dict[str, Any],
-        cluster: Optional[str] = None) -> lsf.LsfClient:
+def make_client_from_ssh_config(ssh_config_dict: Dict[str, Any],
+                                cluster: Optional[str] = None) -> lsf.LsfClient:
     """Build an LsfClient from a provider config `ssh` dict.
 
     `cluster` is what makes this honour submit_as_user. The provider config is
@@ -331,9 +335,9 @@ def make_client_from_ssh_config(
         # existed. Logged rather than silent: on a deployment that HAS enabled
         # submit_as_user this is the one path that would still run as the
         # shared account, and it should be findable.
-        logger.debug('LSF: no cluster alias supplied; submit_as_user cannot '
-                     'be applied and the configured user %r is used.',
-                     user)
+        logger.debug(
+            'LSF: no cluster alias supplied; submit_as_user cannot '
+            'be applied and the configured user %r is used.', user)
     return lsf.LsfClient(
         ssh_config_dict['hostname'],
         int(ssh_config_dict['port']),
@@ -661,8 +665,8 @@ def lsf_queue_info(lsf_cluster_name: Optional[str] = None,
         is_default, gpu_type, gpu_count_per_host, status, njobs, pend, run.
         The last four are None when live state is unavailable.
     """
-    clusters_to_query = ([lsf_cluster_name] if lsf_cluster_name is not None
-                         else clouds.Lsf.existing_allowed_clusters())
+    clusters_to_query = ([lsf_cluster_name] if lsf_cluster_name is not None else
+                         clouds.Lsf.existing_allowed_clusters())
     if not clusters_to_query:
         return []
 
@@ -757,14 +761,13 @@ def _get_lsf_node_info_list(lsf_cluster_name: str) -> List[Dict[str, Any]]:
             # per-GPU counters say — same rule Slurm applies to down/drained.
             'free_gpus': free_gpus if host.is_usable else 0,
             'vcpu_count': host_resources.ncpus if host_resources else None,
-            'memory_gb': (host_resources.max_memory_gb
-                          if host_resources else None),
+            'memory_gb':
+                (host_resources.max_memory_gb if host_resources else None),
             'free_vcpus': host.free_slots,
             # LSF exposes no portable per-host memory reservation view.
             'free_alloc_memory_gb': None,
             'cpu_load': host_load.cpu_load if host_load else None,
-            'free_memory_gb': (host_load.free_memory_gb
-                               if host_load else None),
+            'free_memory_gb': (host_load.free_memory_gb if host_load else None),
         })
     return nodes
 
@@ -790,8 +793,7 @@ def lsf_node_info(
         try:
             return _get_lsf_node_info_list(lsf_cluster_name)
         except (FileNotFoundError, RuntimeError, ValueError,
-                exceptions.CommandError,
-                exceptions.NotSupportedError) as e:
+                exceptions.CommandError, exceptions.NotSupportedError) as e:
             logger.debug(f'Could not retrieve LSF node info: {e}')
             return []
 
