@@ -7,6 +7,17 @@ import pytest
 from sky.adaptors import slurm
 
 
+def _with_marker(cmd: str) -> str:
+    """The command as ``SlurmClient._run_slurm_cmd`` actually sends it.
+
+    Every Slurm command is prefixed with an echo of the output marker, so that
+    whatever the login shell printed first can be split off stdout before a
+    parser sees it. Built from the constant rather than a copy of it, so that
+    renaming the marker does not quietly stop testing the wrapping.
+    """
+    return f'echo {slurm.SlurmClient._OUTPUT_MARKER}\n{cmd}'  # pylint: disable=protected-access
+
+
 class TestGetPartitions:
     """Test SlurmClient.get_partitions()."""
 
@@ -27,7 +38,7 @@ PartitionName=GPU nodes (nvidia) AllowGroups=ALL AllowAccounts=ALL AllowQos=ALL 
 
             result = client.get_partitions()
             mock_run.assert_called_once_with(
-                'scontrol show partitions -o',
+                _with_marker('scontrol show partitions -o'),
                 require_outputs=True,
                 separate_stderr=True,
                 stream_logs=False,
@@ -59,7 +70,9 @@ class TestInfoNodes:
 
             result = client.info_nodes()
             mock_run.assert_called_once_with(
-                f'sinfo -h --Node -o "%N{slurm.SEP}%t{slurm.SEP}%G{slurm.SEP}%c{slurm.SEP}%m{slurm.SEP}%P"',
+                _with_marker(
+                    f'sinfo -h --Node -o "%N{slurm.SEP}%t{slurm.SEP}%G{slurm.SEP}%c{slurm.SEP}%m{slurm.SEP}%P"'
+                ),
                 require_outputs=True,
                 separate_stderr=True,
                 stream_logs=False,
@@ -104,7 +117,7 @@ class TestCheckJobHasNodes:
             mock_run.return_value = (0, 'node1,node2', '')
             assert client.check_job_has_nodes('12345') is True
             mock_run.assert_called_once_with(
-                'squeue -h --jobs 12345 -o "%N"',
+                _with_marker('squeue -h --jobs 12345 -o "%N"'),
                 require_outputs=True,
                 separate_stderr=True,
                 stream_logs=False,
@@ -153,7 +166,7 @@ class TestGetJobState:
             mock_run.return_value = (0, 'RUNNING\n', '')
             result = client.get_job_state('12345')
             mock_run.assert_called_once_with(
-                'squeue -h --only-job-state --jobs 12345 -o "%T"',
+                _with_marker('squeue -h --only-job-state --jobs 12345 -o "%T"'),
                 require_outputs=True,
                 separate_stderr=True,
                 stream_logs=False,
@@ -177,7 +190,7 @@ class TestGetJobState:
             result = client.get_job_state('12345')
             assert mock_run.call_count == 2
             mock_run.assert_called_with(
-                'squeue -h --jobs 12345 -o "%T"',
+                _with_marker('squeue -h --jobs 12345 -o "%T"'),
                 require_outputs=True,
                 separate_stderr=True,
                 stream_logs=False,
@@ -217,7 +230,8 @@ class TestGetJobsStateByName:
 
             result = client.get_jobs_state_by_name('sky-3a5e-pilot-9b1gdacf')
             mock_run.assert_called_once_with(
-                'squeue -h --name sky-3a5e-pilot-9b1gdacf -o "%T"',
+                _with_marker(
+                    'squeue -h --name sky-3a5e-pilot-9b1gdacf -o "%T"'),
                 require_outputs=True,
                 separate_stderr=True,
                 stream_logs=False,
@@ -240,7 +254,7 @@ class TestGetJobsStateByName:
 
             result = client.get_jobs_state_by_name('sky-test-job')
             mock_run.assert_called_once_with(
-                'squeue -h --name sky-test-job -o "%T"',
+                _with_marker('squeue -h --name sky-test-job -o "%T"'),
                 require_outputs=True,
                 separate_stderr=True,
                 stream_logs=False,
@@ -371,7 +385,9 @@ class TestGetAllJobsGres:
 
             # Verify squeue was called
             mock_run.assert_called_once_with(
-                f'squeue -h --states=running,completing -o "%N{slurm.SEP}%b"',
+                _with_marker(
+                    f'squeue -h --states=running,completing -o "%N{slurm.SEP}%b"'
+                ),
                 require_outputs=True,
                 separate_stderr=True,
                 stream_logs=False,
@@ -411,8 +427,10 @@ class TestGetAllJobsInfo:
             result = client.get_all_jobs_info()
 
             mock_run.assert_called_once_with(
-                f'squeue -h --states=running,completing '
-                f'-o "%i{slurm.SEP}%j{slurm.SEP}%u{slurm.SEP}%N{slurm.SEP}%b"',
+                _with_marker(
+                    f'squeue -h --states=running,completing '
+                    f'-o "%i{slurm.SEP}%j{slurm.SEP}%u{slurm.SEP}%N{slurm.SEP}%b"'
+                ),
                 require_outputs=True,
                 separate_stderr=True,
                 stream_logs=False,
@@ -612,7 +630,7 @@ class TestGetProctrackType:
 
             result = client.get_proctrack_type()
             mock_run.assert_called_once_with(
-                'scontrol show config | grep -i "^ProctrackType"',
+                _with_marker('scontrol show config | grep -i "^ProctrackType"'),
                 require_outputs=True,
                 separate_stderr=True,
                 stream_logs=False,
@@ -661,7 +679,7 @@ class TestGetAllNodeDetails:
 
             result = client.get_all_node_details()
             mock_run.assert_called_once_with(
-                'scontrol show node -o',
+                _with_marker('scontrol show node -o'),
                 require_outputs=True,
                 separate_stderr=True,
                 stream_logs=False,
@@ -695,3 +713,55 @@ class TestGetAllNodeDetails:
             result = client.get_all_node_details()
 
         assert list(result.keys()) == ['node1']
+
+
+class TestLoginBannerStripping:
+    """Test that login-shell output is discarded before parsing.
+
+    Gefion's /etc/profile.d/gefion_banner.sh has no interactivity guard, so
+    every `/bin/bash --login` invocation prints a banner to STDOUT -- ahead of
+    whatever the Slurm command itself wrote. Without stripping, `info_nodes`
+    raises on the first banner line, `query_jobs` counts each line as a job id
+    ("Multiple jobs found for cluster"), and `check_dir_shared_fs` reports the
+    banner as a filesystem type.
+    """
+
+    def _client(self):
+        return slurm.SlurmClient(
+            ssh_host='localhost',
+            ssh_port=22,
+            ssh_user='root',
+            ssh_key=None,
+        )
+
+    def test_banner_before_the_marker_is_discarded(self):
+        client = self._client()
+        banner = ('#####################################\n'
+                  '#   Welcome to the Gefion cluster   #\n'
+                  '#####################################\n')
+
+        with mock.patch.object(client._runner, 'run') as mock_run:
+            mock_run.return_value = (
+                0, f'{banner}{slurm.SlurmClient._OUTPUT_MARKER}\nRUNNING\n', '')
+            assert client.get_job_state('12345') == 'RUNNING'
+
+    def test_output_without_a_marker_is_passed_through(self):
+        """A runner that never echoed the marker must not lose its output.
+
+        LocalProcessCommandRunner (autodown from the skylet) runs no login
+        shell, but goes through the same funnel.
+        """
+        client = self._client()
+        with mock.patch.object(client._runner, 'run') as mock_run:
+            mock_run.return_value = (0, 'RUNNING\n', '')
+            assert client.get_job_state('12345') == 'RUNNING'
+
+    def test_a_banner_line_is_not_counted_as_a_job(self):
+        """The `Multiple jobs found for cluster` failure, specifically."""
+        client = self._client()
+        banner = 'Welcome to Gefion\nLast login: Fri Sep 19\n'
+
+        with mock.patch.object(client._runner, 'run') as mock_run:
+            mock_run.return_value = (
+                0, f'{banner}{slurm.SlurmClient._OUTPUT_MARKER}\n12345\n', '')
+            assert client.query_jobs(job_name='sky-test') == ['12345']

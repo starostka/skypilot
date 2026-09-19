@@ -190,11 +190,33 @@ class SlurmClient:
                 slurm_user=slurm_user,
             )
 
+    # Echoed immediately before every Slurm command so that anything the
+    # LOGIN SHELL printed first can be discarded. SkyPilot runs these through
+    # `/bin/bash --login` (it must: that is what puts sinfo on PATH at sites
+    # exporting it from /etc/profile.d), which also runs every other profile
+    # script -- and a site whose banner writes to stdout rather than stderr
+    # then feeds ~35 lines of ASCII art to every parser in this file:
+    #
+    #   info_nodes()          raises on the first banner line
+    #   query_jobs()          counts each banner line as a job id, so a
+    #                         freshly submitted cluster looks like 35 jobs
+    #                         and provisioning aborts
+    #   check_dir_shared_fs() returns the banner as a filesystem type
+    #
+    # Stripping once here fixes all of them, and any parser added later.
+    _OUTPUT_MARKER = '__SKY_SLURM_OUTPUT_BEGINS__'
+
     def _run_slurm_cmd(self, cmd: str) -> Tuple[int, str, str]:
-        return self._runner.run(cmd,
-                                require_outputs=True,
-                                separate_stderr=True,
-                                stream_logs=False)
+        rc, stdout, stderr = self._runner.run(
+            f'echo {self._OUTPUT_MARKER}\n{cmd}',
+            require_outputs=True,
+            separate_stderr=True,
+            stream_logs=False)
+        if self._OUTPUT_MARKER in stdout:
+            stdout = stdout.split(self._OUTPUT_MARKER, 1)[1]
+            if stdout.startswith('\n'):
+                stdout = stdout[1:]
+        return rc, stdout, stderr
 
     def query_jobs(
         self,
